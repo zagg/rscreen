@@ -145,7 +145,7 @@ def main():
     sh(BIN, "-S", "t3", "-x")
     time.sleep(0.3)
 
-    print("\n== 1. demarrage session t1, deux fenetres, Tab ==")
+    print("\n== 1. demarrage session t1, deux fenetres, navigation sans Tab ==")
     d = Drive(["-S", "t1"])
     d.read_for(2.0)
     check("barre de statut affichee", b"rscreen" in d.buf)
@@ -167,34 +167,85 @@ def main():
 
     d.read_for(0.6)
     d.clear()
-    d.send("\t")  # Tab : fenêtre suivante (le cycle revient à 0)
-    d.read_for(1.2)
-    if d.screen is not None:
-        check("Tab affiche l'ecran de la fenetre 0", d.at("MARK-A") and not d.at("MARK-B"))
-        d.clear()
-        d.send("\x1b[Z")  # Maj+Tab -> fenetre 1
-        d.read_for(1.2)
-        check("Maj+Tab affiche l'ecran de la fenetre 1", d.at("MARK-B") and not d.at("MARK-A"))
-    else:
-        d.clear()
-        d.send("\t")
-        check("Tab (sans pyte: octets du diff)", True)
-        d.clear()
-        d.send("\x1b[Z")
-        check("Maj+Tab (sans pyte)", True)
-
-    print("\n== 2. selecteur de sessions (Ctrl+a w) ==")
+    # TAB n'est plus une touche rscreen : elle doit partir vers le shell
+    d.send("echo TAB-TEST\t")
+    d.read_for(1.0)
+    check("Tab transmise au shell, aucune bascule de fenetre",
+          d.at("echo TAB-TEST") and not d.at("MARK-A"))
+    d.send("\r")
+    d.read_for(0.6)
     d.clear()
-    d.send("\x01w")
-    check("fenetre modale du selecteur", d.expect(b"lecteur de sessions", 3))
+    d.send("echo BACKTAB\x1b[Z")  # Maj+Tab : transmise aussi
+    d.read_for(1.0)
+    check("Maj+Tab transmise egalement (aucune bascule)",
+          d.at("echo BACKTAB") and not d.at("MARK-A"))
+    d.send("\r")
+    d.read_for(0.6)
+    d.clear()
+    d.send("\x01n")  # Ctrl+a n : fenetre suivante (le cycle revient a 0)
+    d.read_for(1.0)
+    d.send("\x01l")  # redessin complet : tout repart dans le flux
+    check("Ctrl+a n bascule a la fenetre 0",
+          d.expect(b"MARK-A", 3) and not d.at("MARK-B"))
+    d.clear()
+    d.send("\x01p")  # Ctrl+a p : fenetre precedente
+    d.read_for(1.0)
+    d.send("\x01l")
+    check("Ctrl+a p revient a la fenetre 1",
+          d.expect(b"MARK-B", 3) and not d.at("MARK-A"))
+
+    print("\n== 2. fenetre modale du selecteur (Ctrl+b puis a) ==")
+    d.clear()
+    d.send("\x02a")  # Ctrl+b puis a
+    check("Ctrl+b puis a ouvre la fenetre modale", d.expect(b"lecteur de sessions", 3))
     if d.screen is not None:
         v = d.visible()
         check("cadre dessine (bordures ┌ │ └)", "┌" in v and "└" in v and v.count("│") >= 8)
         check("l'option arriere-plan est proposee", "arriere-plan" in v or "arrière-plan" in v)
+        check("l'option retour au shell est proposee", "retour au shell" in v)
+        check("l'option nouvelle session est proposee", "nouvelle session" in v.lower())
     check("la session t1 est listee", d.expect(b"t1", 2))
+
+    # « retour au shell » : avant-derniere ligne (Fin puis une ligne au-dessus)
     d.clear()
+    d.send("\x1b[F\x1b[A")
+    d.read_for(0.6)
+    d.clear()
+    d.send("\r")
+    d.read_for(0.6)
+    d.send("echo APRES-SHELL\r")
+    check("Entree sur « retour au shell » ramene au shell", d.expect(b"APRES-SHELL", 3))
+
+    # le duo referme la fenetre modale
+    d.clear()
+    d.send("\x02a")
+    check("Ctrl+b puis a la rouvre", d.expect(b"lecteur de sessions", 3))
+    d.clear()
+    d.send("\x02a")
+    d.read_for(0.9)
+    check("et le meme duo la referme", b"lecteur de sessions" not in d.buf)
+
+    # Tab n'a plus rien a faire dans le selecteur : la selection doit bouger
+    # uniquement avec les fleches
+    d.clear()
+    d.send("\x02a")
+    d.expect(b"lecteur", 3)
+    d.clear()
+    d.send("\t\t\t")
+    d.read_for(0.9)
+    check("Tab ne deplace plus la selection", b"ligne 1/" in d.buf)
+    d.clear()
+    d.send("\x1b[B")  # BAS : la, on bouge vraiment
+    d.read_for(0.6)
+    check("et la fleche BAS la deplace", b"ligne 2/" in d.buf)
+    d.clear()
+    d.send("\x1b")  # Echap
+    d.read_for(0.6)
+    d.send("echo APRES-CHAP\r")
+    check("Echap aussi referme la fenetre modale", d.expect(b"APRES-CHAP", 3))
+
     d.send("\x01c")  # une 3e fenetre pour la suite
-    d.read_for(0.5)
+    d.read_for(0.6)
     d.clear()
     d.send("\x01w")
     d.expect(b"lecteur", 3)
@@ -245,8 +296,13 @@ def main():
     d2.read_for(2.0)
     d2.send("\x010")  # Ctrl+a 0 : revenir à la fenêtre 0
     d2.read_for(1.5)
-    check("reprise: contenu ancien re-affiche (MARK-A)", d2.at("MARK-A"))
-    check("reprise: status bar t1", b"t1" in d2.buf)
+    d2.clear()
+    # redessin complet : le diff ne montre que les cellules qui changent, et
+    # la barre de statut doit revenir avec
+    d2.send("\x01l")
+    check("reprise: contenu ancien re-affiche (MARK-A)",
+          d2.expect(b"MARK-A", 3) and d2.at("MARK-A"))
+    check("reprise: status bar t1 (barre repeinte apres Ctrl+a l)", b"t1" in d2.buf)
     d2.clear()
     d2.send("echo REPRIS\r")
     check("reprise: saisie fonctionnelle", d2.expect(b"REPRIS", 3))
@@ -297,7 +353,7 @@ def main():
     out = sh(BIN, "-ls")
     check("t3 a disparu de la liste", "t3" not in out)
 
-    print("\n== 7. protocole clavier etendu (vrai Ctrl+Tab) ==")
+    print("\n== 7. duo clavier, protocole etendu et touches transmises ==")
     d5 = Drive(["-S", "k1"])
     d5.read_for(1.0)
     check("le client requete/active le protocole kitty",
@@ -305,11 +361,29 @@ def main():
     d5.send("\x1b[?1u")  # le terminal repond: flags = 1
     d5.read_for(0.5)
     d5.clear()
-    d5.send("\x1b[9;5u")  # Ctrl+Tab encode
-    check("Ctrl+Tab (kitty) ouvre le selecteur", d5.expect(b"lecteur de sessions", 3))
+    d5.send("\x1b[9;5u")  # Ctrl+Tab encode : ne doit plus rien declencher
+    d5.read_for(1.0)
+    check("Ctrl+Tab n'ouvre plus la fenetre modale", b"lecteur de sessions" not in d5.buf)
+    d5.clear()
+    d5.send("\x02a")  # Ctrl+b puis a : le nouveau raccourci
+    check("Ctrl+b puis a ouvre le selecteur", d5.expect(b"lecteur de sessions", 3))
     d5.clear()
     d5.send("\x1b")  # Echap referme
     d5.read_for(0.8)
+    d5.clear()
+    d5.send("\x02z")  # duo rate : les deux touches repartent vers l'app
+    d5.read_for(0.6)
+    check("un duo rate ne mange pas les touches", b"lecteur" not in d5.buf)
+    d5.send("\x15")  # Ctrl+u : vide la ligne
+    d5.read_for(0.3)
+    d5.clear()
+    d5.send("echo MARQUE")
+    d5.read_for(0.4)
+    d5.send("\x02")  # Ctrl+b seul : rendu a l'app une fois l'echeance passee
+    d5.read_for(0.7)
+    d5.send("OK\r")
+    check("Ctrl+b seul revient a readline apres le delai", d5.expect(b"MARQUOKE", 4))
+    d5.clear()
     d5.clear()
     d5.send("sleep 60\r")
     d5.read_for(0.6)

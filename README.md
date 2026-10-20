@@ -8,20 +8,24 @@
   fermeture du terminal, aux déconnexions, à `SIGHUP` ;
 * chaque session héberge des **fenêtres** (un shell, un build, `htop`… chacun
   dans son propre pty) ;
-* **`Tab`** passe à la fenêtre suivante, **`Maj+Tab`** à la précédente ;
-* **`Ctrl+Tab`** ouvre une **fenêtre modale listant les sessions** : on choisit
-  une session (ou une fenêtre d'une session) avec les flèches, on y bascule avec
-  **`Entrée`**, et on peut aussi **rester en arrière-plan** (détacher) depuis
-  cette même liste.
+* **`Tab`** et **`Maj+Tab`** ne sont **pas capturées** : elles partent telles
+  quelles vers l'application tenue par la fenêtre (complétion du shell, TAB
+  d'un éditeur, touches de navigation…). Changer de fenêtre se fait avec
+  **`Ctrl+a n`** / **`Ctrl+a p`** ou les chiffres **`0`…`9`** ;
+* **`Ctrl+b` puis `a`** ouvre une **fenêtre modale listant les sessions** : on
+  se déplace avec les touches **`↑`** et **`↓`**, on valide avec **`Entrée`**.
+  La liste propose les sessions actives (et leurs fenêtres), « + nouvelle
+  session… », « ← retour au shell » et « ⤳ rester en arrière-plan » (détacher).
 
 ```
-┌ sélecteur de sessions — 2 sessions · ligne 1/6──────────────────────┐
+┌ sélecteur de sessions — 2 sessions · ligne 1/7──────────────────────┐
 │▸▾ dev   ← courante                48×160 · 3 fen. · pid 4242 · JOINTE│
 │      • 0   bash                                                     │
 │        1   cargo watch                                              │
 │      ▸ build                        48×160 · 1 fen. · pid 4300 · ARRIÈRE-PLAN
 │  + nouvelle session…                                                │
-│  ⤳ rester en arrière-plan (détacher ce terminal)             Entrée │
+│  ← retour au shell                                           Entrée  │
+│  ⤳ rester en arrière-plan (détacher ce terminal)            Ctrl+a d │
 └─────────────────────────────────────────────────────────────────────┘
  rscreen « dev » [jointe]  0 bash  1 cargo watch  2 htop     18:42 160×48
 ```
@@ -31,8 +35,8 @@
 ```sh
 cargo build --release     # cible : target/release/rscreen
 make install              # /usr/local/bin/rscreen
-make test                 # 10 tests unitaires
-make itest                # 38 vérifications bout-en-bout dans un pty réel
+make test                 # 11 tests unitaires
+make itest                # 49 vérifications bout-en-bout (53 avec pyte)
 ```
 
 `rscreen` nécessite Linux (pty, `signalfd`, `TIOCGPTPEER`) et un terminal.
@@ -64,11 +68,10 @@ Avec `RSCREEN_DEBUG=1`, le serveur d'une session écrit ses traces dans
 
 | touche          | effet                                                    |
 |-----------------|----------------------------------------------------------|
-| `Tab`           | fenêtre suivante                                          |
-| `Maj+Tab`       | fenêtre précédente                                        |
-| `Ctrl+Tab`      | **sélecteur de sessions** (liste + arrière-plan)          |
+| `Ctrl+b` puis `a` | **fenêtre modale : sélecteur de sessions** (↑ ↓ puis Entrée) |
 | `Ctrl+Entrée`   | détacher : la session repasse en arrière-plan             |
 | `Ctrl+a`        | préfixe à la gnu-screen (puis une des touches ci-dessous) |
+| `Tab` / `Maj+Tab` | **rendues à l'application** : rscreen ne les capture plus |
 
 Après le préfixe `Ctrl+a` :
 
@@ -79,7 +82,7 @@ Après le préfixe `Ctrl+a` :
 | `n`/`p`    | fenêtre suivante / précédente                     |
 | `0`…`9`    | aller à la fenêtre N                              |
 | `Ctrl+a`   | revenir à la fenêtre précédente (`other`)         |
-| `w` ou `"` | sélecteur de sessions — même effet que `Ctrl+Tab`  |
+| `w` ou `"` | sélecteur de sessions — même effet que `Ctrl+b` puis `a` |
 | `c` / `C`  | nouvelle fenêtre / nouvelle fenêtre avec commande  |
 | `k` / `x`  | tuer la fenêtre / tuer la session (confirmation)  |
 | `r`        | renommer la fenêtre                               |
@@ -89,11 +92,20 @@ Après le préfixe `Ctrl+a` :
 | `t`        | état de la session                                |
 | `?` / `h`  | aide                                              |
 
-Dans le sélecteur : `↑↓` (ou `j k`), `PgUp/PgDn`, `Début/Fin` pour choisir,
-`Entrée` pour basculer sur la session (ou la fenêtre) surlignée ou pour rester en
-arrière-plan, `←→` pour déplier/replier les fenêtres, `d` pour mettre une session
-en arrière-plan, `x` pour la tuer, `n` pour en créer une nouvelle, `Échap` ou
-`Ctrl+Tab` pour refermer.
+### Dans la fenêtre modale du sélecteur
+
+La liste, dans l'ordre :
+
+1. les **sessions actives** — déplier une session avec `→` donne ses fenêtres ;
+2. **`+ nouvelle session…`** — nom à saisir, la session est créée puis rejointe ;
+3. **`← retour au shell`** — referme la fenêtre sans rien changer ;
+4. **`⤳ rester en arrière-plan`** — détache ce terminal, la session continue.
+
+On se déplace avec **`↑` / `↓`** (et `PgPr` `PgSu` `Début` `Fin`, ou `j` `k`),
+**`Entrée` valide** la ligne surlignée. Les autres touches : `←` `→` pour
+replier/déplier, `d` pour mettre une session en arrière-plan, `x` pour la tuer,
+`n` pour en créer une nouvelle, `Échap` (ou `Ctrl+b` puis `a` une seconde fois)
+pour refermer.
 
 ## Comment ça marche
 
@@ -114,15 +126,19 @@ terminal réel  <->  client rscreen  <-> [socket unix]  serveur de session  <-> 
   de reprendre une session avec tout son contenu. La région de défilement du
   terminal réel est bornée à la zone des fenêtres (`CSI 1;<n> r`) pour que la
   barre de statut ne soit jamais touchée.
-* **Clavier étendu** : `Ctrl+Tab` n'existe pas sur les terminaux traditionnels
-  (il y est identique à `Tab`). Le client interroge donc le *kitty keyboard
-  protocol* (`CSI ? u`) et l'active (`CSI > 1 u`) si le terminal le parle ; il
-  retraduit ensuite les touches reçues en octets legacy pour que les
-  applications internes (bash, vim…) continuent de comprendre `Ctrl+C`, etc.
-  Si l'application d'une fenêtre demande elle-même le protocole kitty, la
-  traduction est désactivée pour cette fenêtre et la requête de l'application
-  reçoit du serveur la réponse adaptée. Sans terminal compatible, le sélecteur
-  reste accessible par `Ctrl+a w` ou `Ctrl+a "`.
+* **Clavier** : les deux seules touches « métier » du client sont `Ctrl+a`
+  (préfixe) et le duo `Ctrl+b` puis `a` (sélecteur) — toutes deux composées
+  d'octets de contrôle classiques, donc disponibles sur **n'importe quel**
+  terminal, y compris ceux qui ne savent pas envoyer `Ctrl+Tab`. Puisque `Tab`
+  n'est plus capturée, rscreen peut rendre `Ctrl+b` à l'application dès que le
+  deuxième touche tarde (300 ms) : readline garde sa flèche gauche.
+  Le client interroge tout de même le *kitty keyboard protocol* (`CSI ? u`) et
+  l'active (`CSI > 1 u`) si le terminal le parle : cela permet de reconnaître
+  `Ctrl+Entrée` (détacher) et de retraduire les touches étendues en octets
+  legacy pour les applications internes (bash, vim…). Si l'application d'une
+  fenêtre demande elle-même le protocole kitty, la traduction est désactivée
+  pour cette fenêtre et la requête de l'application reçoit du serveur la
+  réponse adaptée.
 * **Sessions** : chaque serveur écrit `sock`, `pid` et `state` dans son
   répertoire ; le client balaie ce répertoire pour construire la liste du
   sélecteur (et purge les sessions mortes). Basculer d'une session à l'autre se

@@ -17,7 +17,7 @@ release:
 test:
 	cargo test
 
-## bout-en-bout : rscreen piloté dans un vrai pty (38 vérifications).
+## bout-en-bout : rscreen piloté dans un vrai pty (49 vérifs, 53 avec pyte).
 ## Avec pyte installé, les assertions portent sur l'écran réellement affiché.
 itest: release
 	RSCREEN=$(TARGET) python3 tests/drive.py

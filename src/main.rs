@@ -1,8 +1,9 @@
 //! rscreen — multiplexeur de terminal façon gnu-screen, écrit en Rust.
 //!
 //! sessions -> serveurs en arrière-plan, chacun hébergeant des *fenêtres*
-//! (des shells dans des ptys). `Tab` change de fenêtre, `Ctrl+Tab` ouvre la
-//! fenêtre de sélection des sessions (avec bascule en arrière-plan).
+//! (des shells dans des ptys). `Ctrl+b` puis `a` ouvre la fenêtre modale de
+//! sélection des sessions (avec bascule en arrière-plan) ; `Ctrl+a n` / `p`
+//! changent de fenêtre. `Tab` n'est pas capturé : elle va à l'application.
 
 mod client;
 mod err;
@@ -46,12 +47,13 @@ fn usage() {
          \t-V                version\n\
          \n\
          \tpendant la session :\n\
-         \t  Tab / Maj+Tab     fenêtre suivante / précédente\n\
-         \t  Ctrl+Tab          sélecteur de sessions : Entrée = basculer sur la\n\
-         \t                    session (ou la fenêtre) choisie, ou rester en\n\
-         \t                    arrière-plan\n\
-         \t  Ctrl+Entrée       détacher (arrière-plan)\n\
-         \t  Ctrl+a            préfixe à la gnu-screen : a c C k x d D n p 0-9 w \" r [ l t ? h\n\
+         \t  Ctrl+b puis a    sélecteur de sessions (fenêtre modale) : on se\n\
+         \t                   déplace avec ↑ ↓, Entrée valide (session, fenêtre,\n\
+         \t                   nouvelle session, retour au shell, arrière-plan)\n\
+         \t  Ctrl+Entrée      détacher (arrière-plan)\n\
+         \t  Ctrl+a           préfixe à la gnu-screen : a c C k x d D n p 0-9 w \" r [ l t ? h\n\
+         \t                   (n / p ou 0..9 pour changer de fenêtre ; Tab y\n\
+         \t                   envoie une vraie tabulation, sinon Tab est libre)\n\
          \n\
          \texemples :\n\
          \t  rscreen -S dev              session « dev », 1 fenêtre shell\n\

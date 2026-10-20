@@ -1,9 +1,11 @@
 //! Décodage des touches lues sur stdin, et ré-encodage « legacy » pour les
 //! applications placées dans les fenêtres.
 //!
-//! Le but est de comprendre aussi bien un terminal ancien (octets de control)
-//! qu'un terminal moderne ayant activé le « kitty keyboard protocol »
-//! (`CSI code ; mods u`), afin de pouvoir distinguer `Tab` de `Ctrl+Tab`.
+//! Le but est de comprendre aussi bien un terminal ancien (octets de control) qu'un
+//! terminal moderne ayant active le « kitty keyboard protocol » (`CSI code ; mods
+//! u`), pour que les modificateurs arrivent correctement aux applications —
+//! notamment Ctrl+Entree (detacher). Depuis que le selecteur est declenche par le
+//! duo `Ctrl+b` puis `a`, `Tab` et `Ctrl+Tab` ne sont plus capturees.
 
 pub const SHIFT: u32 = 1;
 pub const ALT: u32 = 2;
@@ -97,11 +99,18 @@ impl Key {
         self.plain().and_then(|c| c.to_digit(10))
     }
 
+    /// Tab sec : rscreen ne la capture plus (elle est rendue a l'app), mais
+    /// le helper sert encore aux tests et au controle du reencodage.
+    #[allow(dead_code)]
     pub fn is_tab(&self) -> bool {
         self.kind == Kind::Tab && self.mods == 0
     }
 
-    /// Ctrl+Tab (ce que beaucoup de terminaux ne savent pas envoyer)
+    /// Ctrl+Tab. Rien ne depend plus de cette touche cote rscreen (le
+    /// selecteur est declenche par le duo Ctrl+b puis a), mais le decodage est
+    /// conserve : une telle sequence ne doit surtout pas repartir vers
+    /// l'application comme un simple Tab.
+    #[allow(dead_code)]
     pub fn is_tab_ctrl(&self) -> bool {
         self.kind == Kind::Tab && self.mods == CTRL
     }
@@ -708,6 +717,19 @@ mod tests {
 
         let k = one(b"\x1b[1;5C");
         assert_eq!((k.kind, k.mods), (Kind::Right, CTRL));
+    }
+
+    #[test]
+    fn ctrl_b_reconnu_des_le_premier_octet() {
+        // le duo `Ctrl+b` puis `a` doit marcher sur tout type de terminal
+        let k = one(b"\x02");
+        assert_eq!((k.kind, k.mods, k.ch), (Kind::Text, CTRL, Some('b')));
+        assert_eq!(k.ctrl_only(), Some('b'));
+        let k = one(b"\x1b[98;5u"); // Ctrl+B façon kitty
+        assert_eq!(k.ctrl_only(), Some('b'));
+        // et la seconde touche reste une lettre simple, transmissible
+        let k = one(b"a");
+        assert_eq!(k.plain(), Some('a'));
     }
 
     #[test]

@@ -1,5 +1,10 @@
 //! Client rscreen : terminal local, barre de statut fenêtrée, sélecteur de
-//! sessions (Ctrl+Tab), bascule en arrière-plan.
+//! sessions (duo `Ctrl+b` puis `a`), bascule en arrière-plan.
+//!
+//! `Tab` et `Maj+Tab` ne sont jamais capturées : elles partent telles quelles
+//! vers l'application tenue par la fenêtre (complétion du shell, TAB d'un
+//! éditeur, navigations Windows...). Le changement de fenêtre se fait par
+//! `Ctrl+a n` / `Ctrl+a p`, les chiffres `0..9`, ou la fenêtre modale.
 
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -29,6 +34,8 @@ pub struct Config {
 enum Mode {
     Live,
     Prefix,
+    /// `Ctrl+b` pressé, on attend la deuxième touche du duo
+    Chord,
     History,
     Picker,
     Help,
@@ -49,6 +56,7 @@ enum ItemKind {
     Window,
     Background,
     NewSession,
+    ReturnShell,
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +103,11 @@ pub struct Client {
     pty_rows: u16,
     pty_cols: u16,
     mode: Mode,
+    /// duo « Ctrl+b puis a » en cours : octets du préfixe à restituer s'il rate,
+    /// mode d'où l'on vient, et échéance du duo
+    chord_pending: Vec<u8>,
+    chord_from: Mode,
+    chord_at: Option<Instant>,
     msg: Option<(String, Instant)>,
     picker: Picker,
     prompt_buf: String,
@@ -115,18 +128,31 @@ pub struct Client {
 const HELP: &[&str] = &[
     "r s c r e e n   —   aide / raccourcis",
     "",
-    "Tab                     fenêtre suivante",
-    "Maj+Tab                 fenêtre précédente",
-    "Ctrl+Tab                sélecteur de sessions (liste + arrière-plan)",
+    "Ctrl+b puis a           sélecteur de sessions (fenêtre modale)",
     "Ctrl+Entrée             détacher : la session reste en arrière-plan",
     "Ctrl+a                  préfixe (identique à gnu-screen)",
     "",
+    "Fenêtre modale du sélecteur — la liste contient :",
+    "  • les sessions actives (et, dépliées, leurs fenêtres)",
+    "  • « + nouvelle session… »         en créer une",
+    "  • « ← retour au shell »           revenir à la session courante",
+    "  • « ⤳ rester en arrière-plan »    détacher ce terminal",
+    "",
+    "Dans cette fenêtre modale :",
+    "  ↑ ↓  (ou j k)               monter / descendre d'une ligne",
+    "  PgPr PgSu Début Fin         d'une page, en haut, en bas",
+    "  Entrée                      VALIDER la ligne surlignée",
+    "  ← →                         replier / déplier les fenêtres d'une session",
+    "  d  /  x                     mettre cette session en arrière-plan / la tuer",
+    "  n                           en créer une nouvelle",
+    "  Échap  ou  Ctrl+b puis a    la refermer sans rien changer",
+    "",
     "Une fois le préfixe Ctrl+a pressé :",
     "  a                        envoie un vrai Ctrl+a",
-    "  Tab / Maj+Tab            envoie une vraie tabulation (complétion shell)",
-    "  n , Entrée , Tab?        fenêtre suivante        p , ^   fenêtre précédente",
+    "  Tab / Maj+Tab            envoie une tabulation (complétion du shell)",
+    "  n , Entrée               fenêtre suivante        p , ^   fenêtre précédente",
     "  0..9                     aller à la fenêtre N    Ctrl+a  fenêtre précédente",
-    "  w  ou  \"                sélecteur de sessions (même chose que Ctrl+Tab)",
+    "  w  ou  \"                sélecteur de sessions (comme Ctrl+b puis a)",
     "  c                        nouvelle fenêtre (shell) C  nouvelle fenêtre avec commande",
     "  k                        tuer la fenêtre courante  x  tuer toute la session",
     "  r                        renommer la fenêtre courante",
@@ -135,17 +161,17 @@ const HELP: &[&str] = &[
     "  l                        redessiner               t  état de la session",
     "  ?  ou  h                 cette aide",
     "",
-    "Dans le sélecteur de sessions :",
-    "  ↑ ↓ / j k   PgUp PgDn   Début Fin     choisir une ligne",
-    "  Entrée      basculer sur la session (ou la fenêtre) sélectionnée",
-    "  ← →         replier / déplier les fenêtres d'une session",
-    "  d           mettre cette session en arrière-plan   x  la tuer",
-    "  n           créer une nouvelle session            Échap ou Ctrl+Tab  fermer",
-    "",
-    "Note : sur un terminal sans protocole clavier étendu (kitty), Ctrl+Tab est",
-    "indistinguable de Tab ; utilisez alors Ctrl+a w ou Ctrl+a \" (le sélecteur",
-    "affiche à l'attention si le terminal fournit bien Ctrl+Tab).",
+    "Note : Tab et Maj+Tab ne sont plus capturées du tout par rscreen — elles",
+    "vont directement à l'application tenue par la fenêtre. Pour changer de",
+    "fenêtre : Ctrl+a n / Ctrl+a p, les touches 0..9, ou le sélecteur.",
+    "Le duo Ctrl+b puis a fonctionne sur tous les terminaux, y compris ceux",
+    "qui ne savent pas envoyer Ctrl+Tab. Au-delà de 300 ms sans deuxième",
+    "touche, Ctrl+b est rendu à l'application (Ctrl+b = « flèche gauche »",
+    "sous readline / emacs, et il reste donc utilisable ailleurs).",
 ];
+
+/// durée du duo « Ctrl+b puis a » : passé ce délai, Ctrl+b est rendu à l'app
+const CHORD_MS: u64 = 300;
 
 impl Client {
     fn new(cfg: Config) -> Result<Client> {
@@ -170,6 +196,9 @@ impl Client {
             rows,
             cols,
             mode: Mode::Live,
+            chord_pending: Vec::new(),
+            chord_from: Mode::Live,
+            chord_at: None,
             msg: None,
             picker: Picker::default(),
             prompt_buf: String::new(),
@@ -194,14 +223,15 @@ impl Client {
         self.out
             .extend_from_slice(b"\x1b[?1049h\x1b[0m\x1b[?7h\x1b[?25l");
         self.set_region();
-        // requête kitty puis activation: indispensable pour voir Ctrl+Tab
+        // requête kitty puis activation : utile pour bien reconna\u00eetre les
+        // modificateurs (Ctrl+Entrée), mais le sélecteur, lui, n'en dépend pas
         self.out.extend_from_slice(b"\x1b[?u\x1b[>1u");
         self.flush_out();
         self.kitty_wait();
         if self.kitty_term != 0 {
-            self.notify("Ctrl+Tab actif (protocole clavier kitty détecté)");
+            self.notify("protocole clavier étendu actif · sélecteur : Ctrl+b puis a");
         } else {
-            self.notify("terminal sans protocole clavier étendu : utilisez Ctrl+a w");
+            self.notify("sélecteur : Ctrl+b puis a · fenêtres : Ctrl+a n / p / 0..9");
         }
     }
 
@@ -401,7 +431,14 @@ impl Client {
             if let Some(s) = self.sock.as_ref() {
                 poller.add(s.as_raw_fd(), term::TOK_CLIENT, 0);
             }
-            let timeout = if self.keybuf.is_empty() { 400 } else { 60 };
+            let mut timeout = if self.keybuf.is_empty() { 400 } else { 60 };
+            if let Some(dl) = self.chord_at {
+                // on doit se réveiller à l'heure pour rendre Ctrl+b à l'app
+                let left = dl.saturating_duration_since(Instant::now()).as_millis() as i32;
+                if left < timeout {
+                    timeout = left.max(1);
+                }
+            }
             let ready = poller.wait(timeout)?;
             let mut stdin_evt = false;
 
@@ -440,6 +477,7 @@ impl Client {
             if !self.keybuf.is_empty() {
                 self.flush_keys(!stdin_evt);
             }
+            self.expire_chord();
             self.flush_input();
 
             if let Some(name) = self.pending.take() {
@@ -515,7 +553,18 @@ impl Client {
     }
 
     fn overlay_open(&self) -> bool {
-        self.mode == Mode::Picker || self.mode == Mode::Help
+        let m = self.shown_mode();
+        m == Mode::Picker || m == Mode::Help
+    }
+
+    /// le mode réellement visible pendant un duo : le sélecteur reste à
+    /// l'écran pendant qu'on attend la deuxième touche
+    fn shown_mode(&self) -> Mode {
+        if self.mode == Mode::Chord {
+            self.chord_from
+        } else {
+            self.mode
+        }
     }
 
     fn on_winch(&mut self) {
@@ -572,6 +621,7 @@ impl Client {
         match self.mode {
             Mode::Live => self.live_key(k),
             Mode::Prefix => self.prefix_key(k),
+            Mode::Chord => self.chord_key(k),
             Mode::History => self.history_key(k),
             Mode::Picker => self.picker_key(k),
             Mode::Help => self.help_key(k),
@@ -588,10 +638,6 @@ impl Client {
             }
             return;
         }
-        if k.is_tab_ctrl() {
-            self.open_picker();
-            return;
-        }
         if k.is_enter_ctrl() {
             self.detach();
             self.notify(format!("session « {} » en arrière-plan", self.session));
@@ -602,14 +648,12 @@ impl Client {
             self.mode = Mode::Prefix;
             return;
         }
-        if k.is_tab() {
-            self.send(&CMsg::Next);
+        if k.ctrl_only() == Some('b') {
+            self.start_chord(k, Mode::Live);
             return;
         }
-        if k.kind == Kind::Tab && k.mods == SHIFT {
-            self.send(&CMsg::Prev);
-            return;
-        }
+        // Tab et Maj+Tab sont laisseees : elles partent vers l'application
+        // (completion du shell, TAB d'un editeur, touches de navigation...)
         self.forward(k);
     }
 
@@ -629,12 +673,8 @@ impl Client {
 
     fn prefix_key(&mut self, k: &Key) {
         self.mode = Mode::Live;
-        if k.is_tab_ctrl() {
-            self.open_picker();
-            return;
-        }
         if k.kind == Kind::Tab {
-            // Ctrl+a Tab = vraie tabulation (complétion du shell)
+            // Ctrl+a Tab = vraie tabulation (complete le shell)
             self.forward(k);
             return;
         }
@@ -696,6 +736,8 @@ impl Client {
             }
             Some('l') => {
                 self.out.extend_from_slice(b"\x1b[2J\x1b[H");
+                // l'ecran efface a aussi efface la barre : on oublie son cache
+                self.status_cache.clear();
                 self.send(&CMsg::Repaint);
             }
             Some('t') => self.notify(format!(
@@ -799,7 +841,6 @@ impl Client {
             self.help_top = self.help_top.saturating_sub(1);
         }
         if k.kind == Kind::Escape
-            || k.is_tab_ctrl()
             || k.plain() == Some('q')
             || k.plain() == Some('?')
             || k.plain() == Some('h')
@@ -899,6 +940,70 @@ impl Client {
         self.mode = Mode::Picker;
     }
 
+    // ------------------------------------------------- duo « Ctrl+b puis a »
+
+    /// on entre dans le duo : `Ctrl+b` est note, la prochaine touche decidera
+    fn start_chord(&mut self, k: &Key, from: Mode) {
+        self.chord_pending = if k.enc == 0 || self.kitty_app != 0 {
+            k.raw.clone()
+        } else {
+            keys::legacy_bytes(k, self.app_cursor, false)
+        };
+        self.chord_from = from;
+        self.chord_at = Some(Instant::now() + Duration::from_millis(CHORD_MS));
+        self.mode = Mode::Chord;
+    }
+
+    /// deuxieme touche du duo « Ctrl+b puis a »
+    fn chord_key(&mut self, k: &Key) {
+        let from = self.chord_from;
+        let pend = std::mem::take(&mut self.chord_pending);
+        self.chord_at = None;
+        let wants_picker = k.ctrl_only() == Some('a')
+            || matches!(key_char(k), Some(c) if c.to_ascii_lowercase() == 'a');
+        if wants_picker {
+            match from {
+                // le duo referme la fenetre modale d'ou il vient d'etre lance
+                Mode::Picker => self.close_overlay(),
+                _ => self.open_picker(),
+            }
+            return;
+        }
+        self.mode = from;
+        if from != Mode::Live {
+            return;
+        }
+        // ce n'etait pas « Ctrl+b a » : on rend les deux touches a l'app, comme
+        // si rscreen ne les avait pas vues passees
+        if !pend.is_empty() {
+            self.send_input(&pend);
+        }
+        self.forward(k);
+    }
+
+    /// le delai est passe sans deuxieme touche : Ctrl+b retourne a l'app
+    fn expire_chord(&mut self) {
+        if self.mode != Mode::Chord {
+            self.chord_at = None;
+            return;
+        }
+        let Some(dl) = self.chord_at else {
+            return;
+        };
+        if Instant::now() < dl {
+            return;
+        }
+        let from = self.chord_from;
+        self.mode = from;
+        self.chord_at = None;
+        if from == Mode::Live {
+            let pend = std::mem::take(&mut self.chord_pending);
+            if !pend.is_empty() {
+                self.send_input(&pend);
+            }
+        }
+    }
+
     fn close_overlay(&mut self) {
         self.mode = Mode::Live;
         self.send(&CMsg::Repaint);
@@ -974,11 +1079,19 @@ impl Client {
             cur: false,
         });
         items.push(Item {
+            kind: ItemKind::ReturnShell,
+            session: self.session.clone(),
+            win: None,
+            label: " ← retour au shell".into(),
+            info: "Entrée".into(),
+            cur: true,
+        });
+        items.push(Item {
             kind: ItemKind::Background,
             session: self.session.clone(),
             win: None,
             label: " ⤳ rester en arrière-plan (détacher ce terminal)".into(),
-            info: "Entrée".into(),
+            info: "Ctrl+a d".into(),
             cur: true,
         });
         // conserver la selection d'un rafraichissement a l'autre
@@ -1020,8 +1133,13 @@ impl Client {
             self.close_overlay();
             return;
         }
-        if k.is_tab_ctrl() || k.kind == Kind::Escape {
+        if k.kind == Kind::Escape {
             self.close_overlay();
+            return;
+        }
+        if k.ctrl_only() == Some('b') {
+            // Ctrl+b puis a referme le selecteur
+            self.start_chord(k, Mode::Picker);
             return;
         }
         let vis = self.picker_vis().max(1);
@@ -1051,7 +1169,7 @@ impl Client {
             Kind::Enter => {
                 act = Some(self.picker.items[self.picker.sel.min(n - 1)].clone());
             }
-            Kind::Tab => self.picker.sel = (self.picker.sel + 1).min(n - 1),
+            // Tab n'est pas une touche du selecteur : on l'ignore purement
             _ => {}
         }
         if let Some(c) = key_char(k) {
@@ -1159,6 +1277,11 @@ impl Client {
                 self.mode = Mode::Live;
                 self.ask(PromptKind::NewSession, "nom de la nouvelle session : ", 0);
             }
+            ItemKind::ReturnShell => {
+                // on ne quitte pas la session : on referme juste la fenetre
+                // modale, l'ecran du shell revient
+                self.close_overlay();
+            }
         }
     }
 
@@ -1189,9 +1312,10 @@ impl Client {
     // ------------------------------------------------------------- affichage
 
     fn draw(&mut self) {
-        if self.mode == Mode::Picker {
+        let m = self.shown_mode();
+        if m == Mode::Picker {
             self.draw_picker();
-        } else if self.mode == Mode::Help {
+        } else if m == Mode::Help {
             self.draw_help();
         }
         self.draw_status();
@@ -1272,6 +1396,7 @@ impl Client {
         let mut left = format!(" rscreen « {} » [{}] ", self.session, attached);
         match self.mode {
             Mode::Prefix => left.push_str(" Ctrl+a… "),
+            Mode::Chord => left.push_str(" Ctrl+b… "),
             Mode::History => left.push_str(" HISTORIQUE "),
             Mode::Confirm => left.push_str(" CONFIRMATION "),
             Mode::Picker => left.push_str(" SELECTION "),
@@ -1401,7 +1526,7 @@ impl Client {
             let mut line: Vec<u8> = Vec::new();
             styled(
                 &mut line,
-                " ↑↓ choisir · Entrée basculer ou arrière-plan · Échap/Ctrl+Tab fermer · ←→ déplier · d détacher · x tuer · n nouvelle ",
+                " ↑↓ choisir · Entrée valider · ←→ déplier · d/x · n · Échap/Ctrl+b a refermer ",
                 ROW_CUR,
                 w - 2,
             );

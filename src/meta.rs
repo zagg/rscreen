@@ -1,5 +1,5 @@
 //! Métadonnées d'une session : le même format texte est utilisé pour le fichier
-//! `state` sur le disque (lu par le sélecteur Ctrl+Tab) et pour trame `META`
+//! `state` sur le disque (lu par le sélecteur `Ctrl+b` puis `a`) et pour trame `META`
 //! envoyée au client.
 
 use std::fs;
