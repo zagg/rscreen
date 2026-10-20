@@ -36,7 +36,8 @@
 cargo build --release     # cible : target/release/rscreen
 make install              # /usr/local/bin/rscreen
 make test                 # 11 tests unitaires
-make itest                # 49 vérifications bout-en-bout (53 avec pyte)
+make itest                # 49 vérifications bout-en-bout (53 avec pyte), puis
+#                         # 23 sur le renommage de session (make itest-rename)
 ```
 
 `rscreen` nécessite Linux (pty, `signalfd`, `TIOCGPTPEER`) et un terminal.
@@ -96,16 +97,27 @@ Après le préfixe `Ctrl+a` :
 
 La liste, dans l'ordre :
 
-1. les **sessions actives** — déplier une session avec `→` donne ses fenêtres ;
+1. les **sessions actives** — déplier une session avec `→` donne ses fenêtres,
+   `r` la rebaptise ;
 2. **`+ nouvelle session…`** — nom à saisir, la session est créée puis rejointe ;
 3. **`← retour au shell`** — referme la fenêtre sans rien changer ;
 4. **`⤳ rester en arrière-plan`** — détache ce terminal, la session continue.
 
 On se déplace avec **`↑` / `↓`** (et `PgPr` `PgSu` `Début` `Fin`, ou `j` `k`),
 **`Entrée` valide** la ligne surlignée. Les autres touches : `←` `→` pour
-replier/déplier, `d` pour mettre une session en arrière-plan, `x` pour la tuer,
-`n` pour en créer une nouvelle, `Échap` (ou `Ctrl+b` puis `a` une seconde fois)
-pour refermer.
+replier/déplier, `r` pour **renommer** la session surlignée, `d` pour mettre une
+session en arrière-plan, `x` pour la tuer, `n` pour en créer une nouvelle,
+`Échap` (ou `Ctrl+b` puis `a` une seconde fois) pour refermer.
+
+### Renommer une session (`r` dans le sélecteur)
+
+Le nom d'une session est le **répertoire** qui la contient
+(`$XDG_RUNTIME_DIR/rscreen-<uid>/NOM`). Ce n'est donc pas une simple étiquette :
+c'est le serveur qui renomme son propre répertoire, et le socket suit le
+mouvement (un `rename` laisse le même inode) — les clients déjà branchés
+vivent toujours, les prochains se branchent sur le nouveau chemin. Les fenêtres
+déjà ouvertes gardent leur `STY` hérité, les nouvelles fenêtres le reçoivent.
+Nom vide, nom identique ou nom déjà pris sont refusés.
 
 ## Comment ça marche
 

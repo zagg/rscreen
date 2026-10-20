@@ -48,6 +48,8 @@ enum PromptKind {
     NewWindow,
     Rename,
     NewSession,
+    /// rebaptiser une session existante (depuis le selecteur)
+    RenameSession,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -115,6 +117,10 @@ pub struct Client {
     prompt_label: String,
     prompt_kind: PromptKind,
     prompt_target: u32,
+    /// session que l'on est en train de renommer (le `PromptKind` ci-dessus)
+    prompt_src: String,
+    /// ou l'on revient une fois l'invite fermée (le selecteur, par exemple)
+    prompt_back: Mode,
     confirm_session: bool,
     help_top: usize,
     kitty_term: u32,
@@ -149,6 +155,7 @@ const HELP: &[&str] = &[
     "  Entrée                      VALIDER la ligne surlignée",
     "  ← →                         replier / déplier les fenêtres d'une session",
     "  d  /  x                     mettre cette session en arrière-plan / la tuer",
+    "  r                           la renommer (le répertoire du serveur est rebaptisé)",
     "  n                           en créer une nouvelle",
     "  Échap  ou  Ctrl+b puis a    la refermer sans rien changer",
     "",
@@ -211,6 +218,8 @@ impl Client {
             prompt_label: String::new(),
             prompt_kind: PromptKind::NewWindow,
             prompt_target: 0,
+            prompt_src: String::new(),
+            prompt_back: Mode::Live,
             confirm_session: false,
             help_top: 0,
             kitty_term: 0,
@@ -865,7 +874,7 @@ impl Client {
         match k.kind {
             Kind::Enter => {
                 let line = std::mem::take(&mut self.prompt_buf);
-                self.mode = Mode::Live;
+                self.mode = self.prompt_back;
                 match self.prompt_kind {
                     PromptKind::NewWindow => {
                         let cmd = pty::split_command(line.trim());
@@ -887,10 +896,17 @@ impl Client {
                             name: line.trim().to_string(),
                         });
                     }
+                    PromptKind::RenameSession => {
+                        let src = std::mem::take(&mut self.prompt_src);
+                        self.rename_session(&src, line.trim());
+                        if self.mode == Mode::Picker {
+                            self.refresh_picker();
+                        }
+                    }
                 }
             }
             Kind::Escape => {
-                self.mode = Mode::Live;
+                self.mode = self.prompt_back;
                 self.prompt_buf.clear();
             }
             Kind::Backspace => {
@@ -939,6 +955,7 @@ impl Client {
         self.prompt_buf = String::new();
         self.prompt_pos = 0;
         self.prompt_label = label.to_string();
+        self.prompt_back = Mode::Live;
         self.mode = Mode::Prompt;
     }
 
@@ -1221,6 +1238,22 @@ impl Client {
                     self.detach_session(&it.session);
                     self.refresh_picker();
                 }
+                'r' => {
+                    let it = self.picker.items[self.picker.sel.min(n - 1)].clone();
+                    if it.session.is_empty() {
+                        self.notify("« r » : se placer sur une session");
+                    } else {
+                        self.prompt_src = it.session.clone();
+                        self.ask(
+                            PromptKind::RenameSession,
+                            &format!("renommer « {} » en : ", it.session),
+                            0,
+                        );
+                        // l'invite rend la main au selecteur, pas au shell
+                        self.prompt_back = Mode::Picker;
+                        return;
+                    }
+                }
                 'n' => {
                     self.mode = Mode::Live;
                     self.ask(PromptKind::NewSession, "nom de la nouvelle session : ", 0);
@@ -1315,6 +1348,100 @@ impl Client {
             let _ = s.flush();
         }
         self.notify(format!("session « {name} » mise en arrière-plan"));
+    }
+
+    /// rebaptiser une session. C'est le serveur qui renomme son propre
+    /// repertoire : le socket le suit (un `rename` laisse le meme inode), les
+    /// clients deja branches vivent toujours, et les prochains se branchent sur
+    /// le nouveau chemin. Les fenetres ouvertes gardent leur `STY` herite.
+    ///
+    /// On passe par une connexion vers le serveur visé et on rend la main sur
+    /// sa réponse : sans ça, le sélecteur se rafraîchirait avant que le serveur
+    /// a écrit son nouvel état.
+    fn rename_session(&mut self, from: &str, want: &str) {
+        if from.is_empty() {
+            return;
+        }
+        if want.trim().is_empty() {
+            self.notify("nom vide : renommage annulé");
+            return;
+        }
+        let to = paths::sanitize(want);
+        if to != want {
+            self.notify(format!("« {want} » ramené à « {to} »"));
+        }
+        if to == from {
+            self.notify(format!("session « {from} » déjà sous ce nom"));
+            return;
+        }
+        if std::fs::metadata(paths::session_dir(&to)).is_ok() {
+            self.notify(format!("« {to} » porte déjà le nom d'une session"));
+            return;
+        }
+        let mut s = match UnixStream::connect(paths::socket_path(from)) {
+            Ok(s) => s,
+            Err(e) => {
+                self.notify(format!("session « {from} » injoignable : {e}"));
+                return;
+            }
+        };
+        let mut buf = Vec::new();
+        CMsg::RenameSession { name: to.clone() }.write_to(&mut buf);
+        if s.write_all(&buf).is_err() {
+            self.notify(format!("session « {from} » injoignable : envoi raté"));
+            return;
+        }
+        let _ = s.flush();
+        let answer = Self::await_msg(&mut s);
+        // le fichier n'est pas une garantie, le repertoire en est une
+        let done = std::fs::metadata(paths::session_dir(&to)).is_ok()
+            && std::fs::metadata(paths::session_dir(from)).is_err();
+        if done {
+            if from == self.session {
+                self.session = to.clone();
+                self.meta.name = to.clone();
+            }
+            for e in &mut self.picker.expanded {
+                if e == from {
+                    *e = to.clone();
+                }
+            }
+            // les lignes deja listees portent l'ancien nom : on les rebaptise
+            // pour que la selection suive le mouvement
+            for it in &mut self.picker.items {
+                if it.session == from {
+                    it.session = to.clone();
+                }
+            }
+        }
+        self.notify(answer.unwrap_or_else(|| match done {
+            true => format!("session « {from} » renommée « {to} »"),
+            false => format!("renommage de « {from} » sans réponse du serveur"),
+        }));
+    }
+
+    /// la premiere trame MSG est le mot d'accueil du serveur : on la saute et
+    /// on attend la reponse au message qu'on vient de poster
+    fn await_msg(s: &mut UnixStream) -> Option<String> {
+        let _ = s.set_read_timeout(Some(Duration::from_millis(700)));
+        let mut rbuf: Vec<u8> = Vec::new();
+        let mut greeted = false;
+        let until = Instant::now() + Duration::from_millis(700);
+        while Instant::now() < until {
+            let frames = match proto::read_frames(s, &mut rbuf) {
+                Ok(f) => f,
+                Err(_) => break,
+            };
+            for (t, p) in frames {
+                if let Ok(Some(SMsg::Msg(m))) = SMsg::parse(t, &p) {
+                    if greeted {
+                        return Some(m);
+                    }
+                    greeted = true;
+                }
+            }
+        }
+        None
     }
 
     fn notify(&mut self, s: impl Into<String>) {
@@ -1559,7 +1686,7 @@ impl Client {
             let mut line: Vec<u8> = Vec::new();
             styled(
                 &mut line,
-                " ↑↓ choisir · Entrée valider · ←→ déplier · d/x · n · Échap/Ctrl+b a refermer ",
+                " ↑↓ choisir · Entrée valider · ←→ déplier · r renommer · d/x · n · Échap refermer ",
                 ROW_CUR,
                 w - 2,
             );

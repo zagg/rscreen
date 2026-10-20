@@ -50,6 +50,7 @@ fn usage() {
          \t  Ctrl+b puis a    sélecteur de sessions (fenêtre modale) : on se\n\
          \t                   déplace avec ↑ ↓, Entrée valide (session, fenêtre,\n\
          \t                   nouvelle session, retour au shell, arrière-plan)\n\
+         \t                   r renomme la session surlignée\n\
          \t  Ctrl+Entrée      détacher (arrière-plan)\n\
          \t  Ctrl+a           préfixe à la gnu-screen : a c C k x d D n p 0-9 w \" r [ l t ? h\n\
          \t                   (n / p ou 0..9 pour changer de fenêtre ; Tab y\n\

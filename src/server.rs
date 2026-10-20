@@ -589,6 +589,47 @@ impl Server {
         self.render_needed = false;
     }
 
+    /// rebaptiser la session : son répertoire devient son nouveau nom. Le
+    /// socket suit son répertoire (un `rename` garde le même inode), donc les
+    /// clients déjà branchés vivent toujours et les nouveaux se branchent sur
+    /// le nouveau chemin. Les fenêtres déjà ouvertes gardent leur `STY`
+    /// hérité, c'est cosmétique.
+    fn rename_session(&mut self, want: &str) {
+        let from = self.opts.name.clone();
+        let to = paths::sanitize(want);
+        if want.trim().is_empty() {
+            self.msg_all("nom de session vide : renommage annulé");
+            return;
+        }
+        if to == from {
+            self.msg_all(format!("session « {from} » déjà sous ce nom"));
+            return;
+        }
+        if std::fs::metadata(paths::session_dir(&to)).is_ok() {
+            self.msg_all(format!("« {to} » porte déjà le nom d'une session"));
+            return;
+        }
+        if let Err(e) = std::fs::rename(paths::session_dir(&from), paths::session_dir(&to)) {
+            self.msg_all(format!("renommage impossible : {e}"));
+            return;
+        }
+        self.opts.name = to.clone();
+        // le fichier de pid suit le répertoire, on le repeint quand même
+        let _ = std::fs::write(paths::pid_path(&to), format!("{}\n", std::process::id()));
+        self.meta_dirty = true;
+        self.msg_all(format!("session « {from} » renommée « {to} »"));
+    }
+
+    /// un message court pour tous les clients joints
+    fn msg_all(&mut self, s: impl Into<String>) {
+        let t = s.into();
+        for c in &mut self.clients {
+            if c.alive {
+                SMsg::Msg(t.clone()).write_to(&mut c.out);
+            }
+        }
+    }
+
     fn flush_clients(&mut self) {
         for i in 0..self.clients.len() {
             let c = &mut self.clients[i];
@@ -669,6 +710,7 @@ impl Server {
                     self.meta_dirty = true;
                 }
             }
+            CMsg::RenameSession { name } => self.rename_session(&name),
             CMsg::Repaint => {
                 if ci < self.clients.len() {
                     self.clients[ci].need_full = true;

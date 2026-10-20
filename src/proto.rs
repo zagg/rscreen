@@ -34,6 +34,7 @@ pub mod tag {
     pub const SCROLL: u8 = 0x1c;
     pub const QUERY: u8 = 0x1d;
     pub const KITTY_FLAGS: u8 = 0x1e;
+    pub const RENAME_SESSION: u8 = 0x1f;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +66,10 @@ pub enum CMsg {
     KillSession,
     Rename {
         idx: u32,
+        name: String,
+    },
+    /// rebaptiser la session elle-même (le serveur renomme son répertoire)
+    RenameSession {
         name: String,
     },
     Repaint,
@@ -110,6 +115,7 @@ impl CMsg {
                 p.extend_from_slice(name.as_bytes());
                 put(out, tag::RENAME, &p);
             }
+            CMsg::RenameSession { name } => put(out, tag::RENAME_SESSION, name.as_bytes()),
             CMsg::Repaint => put(out, tag::REPAINT, b""),
             CMsg::Scroll { op, amount } => {
                 let o: u8 = match op {
@@ -175,6 +181,9 @@ impl CMsg {
             tag::RENAME => Some(CMsg::Rename {
                 idx: u32at(0)?,
                 name: String::from_utf8_lossy(p.get(4..).unwrap_or(&[])).into_owned(),
+            }),
+            tag::RENAME_SESSION => Some(CMsg::RenameSession {
+                name: String::from_utf8_lossy(p).into_owned(),
             }),
             tag::REPAINT => Some(CMsg::Repaint),
             tag::SCROLL => {
@@ -359,6 +368,9 @@ mod tests {
             CMsg::Rename {
                 idx: 3,
                 name: "un nom".into(),
+            },
+            CMsg::RenameSession {
+                name: "dev-2".into(),
             },
             CMsg::KittyFlags(1),
         ] {
