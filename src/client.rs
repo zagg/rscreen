@@ -1426,7 +1426,7 @@ impl Client {
         line.push(lch);
         line.push(' ');
         line.push_str(label);
-        while display_width(&line) + 2 < w {
+        while display_width(&line) + 1 < w {
             line.push('─');
         }
         line.push(rch);
