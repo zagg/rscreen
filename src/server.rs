@@ -565,6 +565,13 @@ impl Server {
                     let blank = vt100::Parser::new(rows, cols, 0);
                     txt.push_str("\x1b[0m\x1b[39;49m\x1b[?7h\x1b[H\x1b[2J");
                     txt.push_str(&s.state_diff(blank.screen()));
+                    // un ecran vide est cense avoir le curseur visible : le diff
+                    // ne dirait jamais rien si l'app le cache. On impose etat.
+                    txt.push_str(if s.hide_cursor() {
+                        "\x1b[?25l"
+                    } else {
+                        "\x1b[?25h"
+                    });
                 } else if let Some(prev) = self.clients[ci].prev.as_ref() {
                     txt.push_str(&s.state_diff(prev));
                 }

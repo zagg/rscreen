@@ -122,6 +122,11 @@ pub struct Client {
     app_cursor: bool,
     pending: Option<String>,
     status_cache: Vec<u8>,
+    /// curseur déjà masqué pour la fenêtre modale en cours
+    modal_cursor: bool,
+    /// visibilite du curseur telle que l'application de la fenetre l'a posee
+    /// (dernier `DEC 25 h/l` vu dans le flux)
+    cur_app: bool,
     dead: bool,
 }
 
@@ -213,6 +218,8 @@ impl Client {
             app_cursor: false,
             pending: None,
             status_cache: Vec::new(),
+            modal_cursor: false,
+            cur_app: true,
             dead: false,
         })
     }
@@ -220,8 +227,10 @@ impl Client {
     // ---------------------------------------------------------------- terminal
 
     fn setup_term(&mut self) {
+        // le curseur reste visible : c'est le premier repaint qui dit s'il doit
+        // être masqué (une application peut le cacher), pas nous
         self.out
-            .extend_from_slice(b"\x1b[?1049h\x1b[0m\x1b[?7h\x1b[?25l");
+            .extend_from_slice(b"\x1b[?1049h\x1b[0m\x1b[?7h\x1b[?25h");
         self.set_region();
         // requête kitty puis activation : utile pour bien reconna\u00eetre les
         // modificateurs (Ctrl+Entrée), mais le sélecteur, lui, n'en dépend pas
@@ -527,6 +536,9 @@ impl Client {
             };
             match m {
                 SMsg::Data(b) => {
+                    if let Some(v) = scan_cursor(&b) {
+                        self.cur_app = v;
+                    }
                     if !self.overlay_open() {
                         self.out.extend_from_slice(&b);
                     }
@@ -1313,12 +1325,33 @@ impl Client {
 
     fn draw(&mut self) {
         let m = self.shown_mode();
+        self.modal_sync(m);
         if m == Mode::Picker {
             self.draw_picker();
         } else if m == Mode::Help {
             self.draw_help();
         }
         self.draw_status();
+    }
+
+    /// une fenêtre modale (sélecteur, aide, saisie, historique) serait jolée
+    /// par le curseur clignotant : on le masque tant qu'elle est ouverte, puis
+    /// on rend la visibilite que l'application de la fenêtre avait choisi.
+    fn modal_sync(&mut self, m: Mode) {
+        let modal = matches!(
+            m,
+            Mode::Picker | Mode::Help | Mode::Prompt | Mode::Confirm | Mode::History
+        );
+        if modal == self.modal_cursor {
+            return;
+        }
+        self.modal_cursor = modal;
+        let seq: &[u8] = if modal || !self.cur_app {
+            b"\x1b[?25l"
+        } else {
+            b"\x1b[?25h"
+        };
+        self.out.extend_from_slice(seq);
     }
 
     /// save/restore du curseur: le serveur envoie des deplacements relatifs
@@ -1613,6 +1646,38 @@ impl Client {
 
 /// lignes non comptées dans la zone de liste du sélecteur
 const PICKER_CHROME: usize = 3;
+
+/// retrouve la derniere sequence « DEC private mode 25 » (curseur visible ou
+/// non) d'un flux : c'est l'application de la fenetre qui la pose, pas nous.
+/// `None` si le flux n'en dit rien.
+fn scan_cursor(b: &[u8]) -> Option<bool> {
+    let mut last = None;
+    let mut i = 0usize;
+    while i + 6 <= b.len() {
+        if b[i] == 0x1b
+            && b[i + 1] == b'['
+            && b[i + 2] == b'?'
+            && b[i + 3] == b'2'
+            && b[i + 4] == b'5'
+        {
+            match b[i + 5] {
+                b'h' => {
+                    last = Some(true);
+                    i += 6;
+                }
+                b'l' => {
+                    last = Some(false);
+                    i += 6;
+                }
+                // suite privee quelconque (`?25;1H`…) : on ne saute qu'un octet
+                _ => i += 1,
+            }
+        } else {
+            i += 1;
+        }
+    }
+    last
+}
 
 fn pad_spaces(o: &mut Vec<u8>, w: usize, cols: usize) {
     o.extend(std::iter::repeat_n(b' ', cols.saturating_sub(w)));
@@ -1917,4 +1982,21 @@ pub fn signal_session(name: &str, kill: bool) -> Result<()> {
     s.write_all(&buf)?;
     let _ = s.flush();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scan_cursor;
+
+    #[test]
+    fn visibilite_du_curseur_suivie_dans_le_flux() {
+        assert_eq!(scan_cursor(b"rien"), None);
+        assert_eq!(scan_cursor(b"\x1b[?25l"), Some(false));
+        assert_eq!(scan_cursor(b"a\x1b[?25hb"), Some(true));
+        // la derniere compte
+        assert_eq!(scan_cursor(b"\x1b[?25l\x1b[?25h\x1b[?25l"), Some(false));
+        // les autres modes prives ne trompent pas DEC-25
+        assert_eq!(scan_cursor(b"\x1b[?25;1H"), None);
+        assert_eq!(scan_cursor(b"\x1b[?1049h"), None);
+    }
 }

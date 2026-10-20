@@ -126,6 +126,10 @@ terminal réel  <->  client rscreen  <-> [socket unix]  serveur de session  <-> 
   de reprendre une session avec tout son contenu. La région de défilement du
   terminal réel est bornée à la zone des fenêtres (`CSI 1;<n> r`) pour que la
   barre de statut ne soit jamais touchée.
+* **Curseur** : la visibilité du curseur est celle de **l'application** (`DEC
+  private mode 25`) — le serveur l'impose à chaque rendu complet et le client la
+  suit dans le flux. rscreen ne le masque que pour les fenêtres modales
+  (sélecteur, aide, saisie, historique) et le rend à la fermeture.
 * **Clavier** : les deux seules touches « métier » du client sont `Ctrl+a`
   (préfixe) et le duo `Ctrl+b` puis `a` (sélecteur) — toutes deux composées
   d'octets de contrôle classiques, donc disponibles sur **n'importe quel**
