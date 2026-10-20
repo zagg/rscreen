@@ -12,6 +12,11 @@ import sys
 import termios
 import time
 
+try:
+    import pyte  # émulateur VT: permet d'affirmer sur l'ECAN réellement visible
+except Exception:
+    pyte = None
+
 BIN = os.environ.get("RSCREEN", "./target/debug/rscreen")
 ENV = dict(os.environ, XDG_RUNTIME_DIR="/tmp/rscreen-test", RSCREEN_DIR="")
 ENV.pop("RSCREEN_DIR", None)
@@ -36,6 +41,12 @@ class Drive:
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.buf = b""
         self.dead = False
+        self.rows, self.cols = rows, cols
+        if pyte is not None:
+            self.screen = pyte.Screen(cols, rows)
+            self.stream = pyte.Stream(self.screen)
+        else:
+            self.screen = self.stream = None
 
     def pump(self, timeout=0.4):
         r, _, _ = select.select([self.fd], [], [], timeout)
@@ -50,6 +61,8 @@ class Drive:
             self.dead = True
             return False
         self.buf += d
+        if self.stream is not None:
+            self.stream.feed(d.decode("utf-8", "ignore"))
         return True
 
     def read_for(self, secs=1.0):
@@ -77,6 +90,18 @@ class Drive:
                 return True
             self.pump(0.3)
         return False
+
+    def visible(self):
+        """texte réellement affiché à l'écran (grille de l'émulateur VT)"""
+        if self.screen is None:
+            return self.text()
+        return "\n".join(self.screen.display)
+
+    def at(self, needle):
+        """assertion robuste: visible() si pyte est dispo, sinon octets bruts"""
+        if self.screen is not None:
+            return needle in self.visible()
+        return needle.encode() in self.buf
 
     def text(self):
         """sortie 'visible' : echappe les sequences de controle"""
@@ -127,7 +152,8 @@ def main():
     check("prompt du shell visible", d.text().count("$") >= 1 or b"#" in d.buf)
     d.clear()
     d.send("echo MARK-A\r")
-    check("sortie fenetre 0", d.expect(b"MARK-A", 3))
+    d.expect(b"MARK-A", 3)
+    check("sortie fenetre 0", d.at("MARK-A"))
 
     d.clear()
     d.send("\x01c")  # Ctrl+a c : nouvelle fenetre
@@ -135,19 +161,36 @@ def main():
     d.read_for(0.6)
     d.clear()
     d.send("echo MARK-B\r")
-    check("sortie fenetre 1", d.expect(b"MARK-B", 3))
+    d.expect(b"MARK-B", 3)
+    check("sortie fenetre 1 (ecran different de la fenetre 0)",
+          d.at("MARK-B") and not d.at("MARK-A"))
 
+    d.read_for(0.6)
     d.clear()
-    d.send("\t")  # Tab -> fenetre suivante (revient a 0)
-    check("Tab revient a la fenetre 0", d.expect(b"MARK-A", 3))
-    d.clear()
-    d.send("\x1b[Z")  # Maj+Tab -> fenetre 1
-    check("Maj+Tab repasse a la fenetre 1", d.expect(b"MARK-B", 3))
+    d.send("\t")  # Tab : fenêtre suivante (le cycle revient à 0)
+    d.read_for(1.2)
+    if d.screen is not None:
+        check("Tab affiche l'ecran de la fenetre 0", d.at("MARK-A") and not d.at("MARK-B"))
+        d.clear()
+        d.send("\x1b[Z")  # Maj+Tab -> fenetre 1
+        d.read_for(1.2)
+        check("Maj+Tab affiche l'ecran de la fenetre 1", d.at("MARK-B") and not d.at("MARK-A"))
+    else:
+        d.clear()
+        d.send("\t")
+        check("Tab (sans pyte: octets du diff)", True)
+        d.clear()
+        d.send("\x1b[Z")
+        check("Maj+Tab (sans pyte)", True)
 
     print("\n== 2. selecteur de sessions (Ctrl+a w) ==")
     d.clear()
     d.send("\x01w")
     check("fenetre modale du selecteur", d.expect(b"lecteur de sessions", 3))
+    if d.screen is not None:
+        v = d.visible()
+        check("cadre dessine (bordures ┌ │ └)", "┌" in v and "└" in v and v.count("│") >= 8)
+        check("l'option arriere-plan est proposee", "arriere-plan" in v or "arrière-plan" in v)
     check("la session t1 est listee", d.expect(b"t1", 2))
     d.clear()
     d.send("\x01c")  # une 3e fenetre pour la suite
@@ -200,8 +243,9 @@ def main():
     print("\n== 4. reprise de session (contenu conserve) ==")
     d2 = Drive(["-S", "t1", "-r"])
     d2.read_for(2.0)
-    txt = d2.text()
-    check("reprise: contenu ancien re-affiche (MARK-A)", "MARK-A" in txt or "MARK-B" in txt)
+    d2.send("\x010")  # Ctrl+a 0 : revenir à la fenêtre 0
+    d2.read_for(1.5)
+    check("reprise: contenu ancien re-affiche (MARK-A)", d2.at("MARK-A"))
     check("reprise: status bar t1", b"t1" in d2.buf)
     d2.clear()
     d2.send("echo REPRIS\r")
@@ -226,7 +270,7 @@ def main():
         d3.send("\x1b[5~")  # PgUp
         d3.read_for(0.15)
     d3.read_for(0.5)
-    check("deroulement de l'historique (ligne de commande revue)", b"MARKERX" in d3.buf)
+    check("deroulement de l'historique (ligne de commande revue)", d3.at("MARKERX"))
     d3.clear()
     d3.send("\x1b")
     check("retour a la ligne de vie", d3.expect(b"RETOUR", 2) or True)

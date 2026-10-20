@@ -128,6 +128,9 @@ struct Client {
     scroll: usize,
     kitty_flags: u32,
     alive: bool,
+    /// le terminal du client a disparu (écriture en EPIPE) : on ne lui envoie
+    /// plus rien, mais on lit malgré tout ce qu'il a pu laisser dans le socket
+    silent: bool,
 }
 
 pub struct Server {
@@ -450,6 +453,7 @@ impl Server {
             scroll: 0,
             kitty_flags: 0,
             alive: true,
+            silent: false,
         };
         SMsg::Meta(self.meta().encode()).write_to(&mut c.out);
         SMsg::Msg(format!("session « {} » jointe", self.opts.name)).write_to(&mut c.out);
@@ -581,14 +585,18 @@ impl Server {
     fn flush_clients(&mut self) {
         for i in 0..self.clients.len() {
             let c = &mut self.clients[i];
-            if !c.alive || c.out.is_empty() {
+            if !c.alive || c.out.is_empty() || c.silent {
+                c.out.clear();
                 continue;
             }
             match c.writer.try_clone() {
                 Ok(mut s) => {
                     if let Err(e) = proto::write_all_frames(&mut s, &mut c.out) {
-                        eprintln!("rscreen serveur: écriture client perdue: {e}");
-                        c.alive = false;
+                        dbgln(&format!(
+                            "écriture client perdue ({e}) — on draine ses messages"
+                        ));
+                        c.silent = true;
+                        c.out.clear();
                     }
                 }
                 Err(_) => c.alive = false,
@@ -690,6 +698,51 @@ impl Server {
         }
     }
 
+    /// lit les trames arrivées d'un client ; marque le client mort si besoin
+    /// (la session, elle, continue en arrière-plan)
+    fn on_client_event(&mut self, idx: usize) {
+        let frames = {
+            let c = &mut self.clients[idx];
+            proto::read_frames(&mut c.sock, &mut c.rbuf)
+        };
+        let fl = match frames {
+            Ok(fl) => fl,
+            Err(_) => {
+                self.drop_client(idx);
+                return;
+            }
+        };
+        if fl.is_empty() {
+            // simple déconnexion : la session, elle, continue en arrière-plan
+            self.drop_client(idx);
+            return;
+        }
+        if self.clients[idx].silent {
+            dbgln("message reçu d'un client déjà parti");
+        }
+        for (t, p) in fl {
+            match CMsg::parse(t, &p) {
+                Ok(Some(m)) => self.handle_client_msg(idx, m),
+                Ok(None) => {}
+                Err(_) => {
+                    self.drop_client(idx);
+                    return;
+                }
+            }
+            // la commande a pu fermer la session : le client n'existe plus
+            if idx >= self.clients.len() {
+                break;
+            }
+        }
+    }
+
+    fn drop_client(&mut self, idx: usize) {
+        if idx < self.clients.len() {
+            self.clients[idx].alive = false;
+        }
+        dbgln("client déconnecté — la session reste en arrière-plan");
+    }
+
     fn reap(&mut self) {
         if self.zombies.is_empty() {
             return;
@@ -735,48 +788,20 @@ impl Server {
             }
             let ready = poller.wait(timeout)?;
 
-            let mut closed: Vec<usize> = Vec::new();
             for (tok, idx, _rev) in ready {
                 match tok {
                     term::TOK_LISTEN => self.accept(),
                     term::TOK_WINDOW => self.pump_window(idx),
-                    term::TOK_CLIENT if idx < self.clients.len() => {
-                        {
-                            let frames = {
-                                let c = &mut self.clients[idx];
-                                proto::read_frames(&mut c.sock, &mut c.rbuf)
-                            };
-                            match frames {
-                                Ok(fl) => {
-                                    if fl.is_empty() {
-                                        // le client s'est déconnecté: la session,
-                                        // elle, continue en arrière-plan
-                                        closed.push(idx);
-                                    }
-                                    for (t, p) in fl {
-                                        match CMsg::parse(t, &p) {
-                                            Ok(Some(m)) => self.handle_client_msg(idx, m),
-                                            Ok(None) => {}
-                                            Err(_) => closed.push(idx),
-                                        }
-                                    }
-                                }
-                                Err(_) => closed.push(idx),
-                            }
-                        }
-                    }
+                    term::TOK_CLIENT if idx < self.clients.len() => self.on_client_event(idx),
                     _ => {}
                 }
             }
-            if !closed.is_empty() {
-                dbgln("client déconnecté — la session reste en arrière-plan");
-            }
-            for i in closed {
-                if i < self.clients.len() {
-                    self.clients[i].alive = false;
-                }
-            }
+            let nclients = self.clients.len();
             self.clients.retain(|c| c.alive);
+            if self.clients.len() != nclients {
+                // le fichier d'état doit refléter la session en arrière-plan
+                self.meta_dirty = true;
+            }
             self.reap();
 
             if self.render_needed {

@@ -36,6 +36,7 @@ fn usage() {
          \t-S NOM            nom de la session (défaut : « {} »)\n\
          \t-c COMMANDE       commande lancée dans la première fenêtre\n\
          \t-t TITRE          titre de la première fenêtre\n\
+         \t-m                démarrer la session en arrière-plan (sans terminal)\n\
          \t-x                tuer la session\n\
          \t-X COMMANDE       envoyer une commande à la session (next prev other new\n\
          \t                  select:N detach kill redraw query)\n\
@@ -83,6 +84,7 @@ struct Opts {
     detach: bool,
     detach_then_attach: bool,
     kill: bool,
+    background: bool,
     remote: Option<String>,
     scrollback: usize,
     positional: Vec<String>,
@@ -102,6 +104,7 @@ impl Default for Opts {
             detach: false,
             detach_then_attach: false,
             kill: false,
+            background: false,
             remote: None,
             scrollback: 2000,
             positional: Vec::new(),
@@ -135,6 +138,7 @@ fn dispatch(args: &[String]) -> Result<()> {
                     return Ok(());
                 }
                 "--kill" => o.kill = true,
+                "--background" => o.background = true,
                 "--detach" => o.detach = true,
                 "--attach" => {}
                 other => return Err(msg(format!("option inconnue: {other}"))),
@@ -184,6 +188,7 @@ fn dispatch(args: &[String]) -> Result<()> {
                     'D' => o.detach_then_attach = true,
                     'R' => o.resume = true,
                     'x' => o.kill = true,
+                    'm' => o.background = true,
                     'V' => {
                         println!("rscreen {VERSION}");
                         return Ok(());
@@ -209,6 +214,9 @@ fn dispatch(args: &[String]) -> Result<()> {
 
     let session = paths::sanitize(&o.session);
 
+    if o.background || (o.detach && !o.cmd.is_empty() && unsafe { libc::isatty(0) } != 1) {
+        return client::spawn_background(&cfg_of(&session, &o));
+    }
     if o.list {
         return client::list_sessions();
     }
@@ -239,6 +247,17 @@ fn dispatch(args: &[String]) -> Result<()> {
     client::attach(cfg)
 }
 
+fn cfg_of(session: &str, o: &Opts) -> client::Config {
+    client::Config {
+        session: session.to_string(),
+        cmd: o.cmd.clone(),
+        title: o.title.clone(),
+        create: true,
+        scrollback: o.scrollback,
+        first_win: None,
+    }
+}
+
 fn run_server_hidden(args: &[String]) -> Result<()> {
     if args.len() < 5 {
         return Err(msg(
@@ -251,6 +270,7 @@ fn run_server_hidden(args: &[String]) -> Result<()> {
     let scrollback: usize = args[4].parse().unwrap_or(2000);
     let mut cmd: Vec<String> = Vec::new();
     let mut title = String::new();
+    let mut log: Option<String> = None;
     let mut i = 5usize;
     while i < args.len() {
         match args[i].as_str() {
@@ -267,9 +287,29 @@ fn run_server_hidden(args: &[String]) -> Result<()> {
                 title = args.get(i + 1).cloned().unwrap_or_default();
                 i += 1;
             }
+            "--log" => {
+                log = args.get(i + 1).cloned();
+                i += 1;
+            }
             _ => {}
         }
         i += 1;
+    }
+    if let Some(path) = log {
+        // journal des traces de serveur (RSCREEN_DEBUG=1)
+        use std::os::unix::io::AsRawFd;
+        if let Some(par) = std::path::Path::new(&path).parent() {
+            let _ = std::fs::create_dir_all(par);
+        }
+        if let Ok(f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            unsafe {
+                libc::dup2(f.as_raw_fd(), 2);
+            }
+        }
     }
     let opts = server::Opts {
         name: name.clone(),

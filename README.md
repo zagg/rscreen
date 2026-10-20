@@ -47,6 +47,7 @@ rscreen -S build -c 'make -j8'   # première fenêtre : une commande précise
 rscreen -ls                  # lister les sessions
 rscreen -S dev -L            # lister les fenêtres d'une session
 rscreen -S dev -d            # détacher (arrière-plan) sans se raccorder
+rscreen -S cron -dm -c 'make -j8'   # session démarrée sans terminal (arrière-plan)
 rscreen -D -S dev            # éjecter les autres clients puis se raccorder
 rscreen -S dev -x            # tuer la session
 rscreen -S dev -X next       # piloter à distance (next prev other new select:N
@@ -55,6 +56,9 @@ rscreen -S dev -X next       # piloter à distance (next prev other new select:N
 
 Sessions et sockets sont rangés dans `$XDG_RUNTIME_DIR/rscreen-<uid>`
 (ou `/tmp/rscreen-<uid>`), ou `$RSCREEN_DIR` si définie.
+
+Avec `RSCREEN_DEBUG=1`, le serveur d'une session écrit ses traces dans
+`$RSCREEN_DIR/debug.log` (pratique pour comprendre une session récalcitrante).
 
 ## Raccourcis
 

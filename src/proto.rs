@@ -343,14 +343,23 @@ mod tests {
     fn trames_client() {
         for m in [
             CMsg::Input(b"\x03".to_vec()),
-            CMsg::Resize { rows: 40, cols: 120 },
+            CMsg::Resize {
+                rows: 40,
+                cols: 120,
+            },
             CMsg::Switch(7),
             CMsg::New {
                 cmd: vec!["make".into(), "-j8".into()],
                 title: "build".into(),
             },
-            CMsg::Scroll { op: ScrollOp::Rel, amount: -12 },
-            CMsg::Rename { idx: 3, name: "un nom".into() },
+            CMsg::Scroll {
+                op: ScrollOp::Rel,
+                amount: -12,
+            },
+            CMsg::Rename {
+                idx: 3,
+                name: "un nom".into(),
+            },
             CMsg::KittyFlags(1),
         ] {
             let mut buf = Vec::new();

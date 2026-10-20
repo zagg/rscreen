@@ -355,6 +355,15 @@ impl Client {
             args.push("--title".to_string());
             args.push(self.cfg.title.clone());
         }
+        if std::env::var("RSCREEN_DEBUG").is_ok() {
+            args.push("--log".to_string());
+            args.push(
+                paths::base_dir()
+                    .join("debug.log")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
         pty::spawn_detached(&exe, &args)?;
         Ok(())
     }
@@ -1598,7 +1607,9 @@ fn next_char(s: &str, pos: usize) -> usize {
 /// point d'entrée: boucle d'attachement, avec bascule de session à la volée
 pub fn attach(cfg: Config) -> Result<()> {
     if unsafe { libc::isatty(0) } != 1 {
-        return Err(msg("rscreen a besoin d'un terminal (stdin)"));
+        return Err(msg(
+            "rscreen a besoin d'un terminal pour s'y raccorder\n\t(pour démarrer une session sans terminal : rscreen -S nom -dm -c 'commande')",
+        ));
     }
     let _raw = term::RawTTY::enable(0)?;
     let mut c = Client::new(cfg)?;
@@ -1616,6 +1627,55 @@ pub fn attach(cfg: Config) -> Result<()> {
 }
 
 // --------------------------------------------------------------- commandes utiles
+
+/// démarre un serveur de session sans s'y raccorder (usage `rscreen -S nom -dm -c cmd`)
+pub fn spawn_background(cfg: &Config) -> Result<()> {
+    if SessionMeta::load(&cfg.session).is_some() {
+        return Err(msg(format!(
+            "la session « {} » tourne déjà (rscreen -ls pour la voir)",
+            cfg.session
+        )));
+    }
+    let (rows, cols) = term::term_size(0).unwrap_or((24, 80));
+    let exe = std::env::current_exe()?;
+    let mut args: Vec<String> = vec![
+        "--__server".to_string(),
+        cfg.session.clone(),
+        rows.max(4).to_string(),
+        cols.max(12).to_string(),
+        cfg.scrollback.to_string(),
+    ];
+    if !cfg.cmd.is_empty() {
+        args.push("--cmd".to_string());
+        args.push(cfg.cmd.join("\u{1}"));
+    }
+    if !cfg.title.is_empty() {
+        args.push("--title".to_string());
+        args.push(cfg.title.clone());
+    }
+    if std::env::var("RSCREEN_DEBUG").is_ok() {
+        args.push("--log".to_string());
+        args.push(
+            paths::base_dir()
+                .join("debug.log")
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    let pid = pty::spawn_detached(&exe, &args)?;
+    println!(
+        "session « {} » démarrée en arrière-plan (pid {pid})",
+        cfg.session
+    );
+    // on laisse au serveur le temps de créer sa socket
+    for _ in 0..60 {
+        if SessionMeta::load(&cfg.session).is_some() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    Err(msg("le serveur de session ne répond pas"))
+}
 
 pub fn list_sessions() -> Result<()> {
     let sessions = meta::all_sessions();
@@ -1640,9 +1700,9 @@ pub fn list_sessions() -> Result<()> {
             s.wins
                 .iter()
                 .map(|w| format!(
-                    "[{}{} {}",
+                    "[{}{}: {}]",
                     w.idx,
-                    if w.active { "*" } else { " " },
+                    if w.active { "*" } else { "" },
                     w.display()
                 ))
                 .collect::<Vec<_>>()
@@ -1695,20 +1755,24 @@ pub fn remote(name: &str, cmd: &str) -> Result<()> {
     s.flush()?;
     s.set_read_timeout(Some(Duration::from_millis(200)))?;
     let mut rb = Vec::new();
+    let mut last: Option<SessionMeta> = None;
     if let Ok(fl) = proto::read_frames(&mut s, &mut rb) {
         for (t, p) in fl {
             if let Ok(Some(SMsg::Meta(txt))) = SMsg::parse(t, &p) {
                 if let Some(mt) = SessionMeta::decode(&txt) {
-                    for w in mt.wins {
-                        println!(
-                            "{}{} {}",
-                            w.idx,
-                            if w.active { "*" } else { " " },
-                            w.display()
-                        );
-                    }
+                    last = Some(mt);
                 }
             }
+        }
+    }
+    if let Some(mt) = last {
+        for w in mt.wins {
+            println!(
+                "{}{} {}",
+                w.idx,
+                if w.active { "*" } else { " " },
+                w.display()
+            );
         }
     }
     Ok(())

@@ -17,13 +17,14 @@ release:
 test:
 	cargo test
 
-## bout-en-bout : rscreen piloté dans un vrai pty (38 vérifications)
+## bout-en-bout : rscreen piloté dans un vrai pty (38 vérifications).
+## Avec pyte installé, les assertions portent sur l'écran réellement affiché.
 itest: release
-	python3 tests/drive.py
+	RSCREEN=$(TARGET) python3 tests/drive.py
 
 ## rendu "visuel" : l'écran du client est rejoué dans un émulateur VT (pyte)
 dump: release
-	/tmp/vt/bin/python tests/screen_dump.py || python3 tests/screen_dump.py
+	python3 tests/screen_dump.py
 
 install: release
 	install -Dm755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/$(BIN)
