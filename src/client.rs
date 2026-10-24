@@ -351,10 +351,7 @@ impl Client {
                             paths::cleanup_session_dir(name);
                         }
                         if !create {
-                            return Err(msg(format!(
-                                "aucune session « {name} » en cours ({e})\n\
-                                 \t(`rscreen -S {name}` pour en démarrer une)"
-                            )));
+                            return Err(msg(no_such_session(name, Some(&e))));
                         }
                         self.spawn_server(name)?;
                         spawned = true;
@@ -1849,6 +1846,30 @@ fn session_alive(name: &str) -> bool {
     }
 }
 
+/// message explicite quand la session visée est introuvable : ce qui tourne
+/// vraiment, et le geste exact pour s'y raccorder (nom OU pid).
+fn no_such_session(name: &str, e: Option<&std::io::Error>) -> String {
+    let why = e.map(|e| format!(" ({e})")).unwrap_or_default();
+    let live = meta::all_sessions();
+    if live.is_empty() {
+        return format!(
+            "aucune session en cours{why}\n\
+             \t(`rscreen -S {name} -m -c 'commande'` : démarrer en arrière-plan, puis `rscreen -ls`)"
+        );
+    }
+    let list = live
+        .iter()
+        .map(|m| format!("{} (pid {})", m.name, m.pid))
+        .collect::<Vec<_>>();
+    format!(
+        "aucune session « {name} » en cours{why}\n\
+         \tsessions vivantes : {}\n\
+         \t(`rscreen -ls` pour le détail, `rscreen -r {}` pour s'y raccorder, `rscreen -r <pid>` aussi)",
+        list.join(", "),
+        live[0].name
+    )
+}
+
 fn parse_kitty_reply(raw: &[u8]) -> Option<u32> {
     // \x1b[?<flags>u
     if raw.len() < 4
@@ -2026,11 +2047,12 @@ pub fn list_sessions() -> Result<()> {
                 .join(" ")
         );
     }
+    println!("  (s'y raccorder : rscreen -r NOM ou rscreen -r PID, la colonne pid ci-dessus)");
     Ok(())
 }
 
 pub fn list_windows(name: &str) -> Result<()> {
-    let s = SessionMeta::load(name).ok_or_else(|| msg(format!("pas de session « {name} »")))?;
+    let s = SessionMeta::load(name).ok_or_else(|| msg(no_such_session(name, None)))?;
     for w in s.wins {
         println!(
             "{}{} {}",
@@ -2043,10 +2065,8 @@ pub fn list_windows(name: &str) -> Result<()> {
 }
 
 pub fn remote(name: &str, cmd: &str) -> Result<()> {
-    let mut s = UnixStream::connect(paths::socket_path(name)).map_err(|_| {
-        msg(format!(
-            "aucune session « {name} » à qui envoyer cette commande"
-        ))
+    let mut s = UnixStream::connect(paths::socket_path(name)).map_err(|e| {
+        msg(no_such_session(name, Some(&e)))
     })?;
     let m = if let Some(rest) = cmd.strip_prefix("select:") {
         CMsg::Switch(rest.parse().unwrap_or(0))
@@ -2098,7 +2118,7 @@ pub fn remote(name: &str, cmd: &str) -> Result<()> {
 pub fn signal_session(name: &str, kill: bool) -> Result<()> {
     let path = paths::socket_path(name);
     let mut s = UnixStream::connect(&path)
-        .map_err(|_| msg(format!("aucune session « {name} » en cours")))?;
+        .map_err(|e| msg(no_such_session(name, Some(&e))))?;
     let mut buf = Vec::new();
     (if kill {
         CMsg::KillSession

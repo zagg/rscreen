@@ -36,7 +36,8 @@
 cargo build --release     # cible : target/release/rscreen
 make install              # /usr/local/bin/rscreen
 make test                 # 11 tests unitaires
-make itest                # 49 vérifications bout-en-bout (53 avec pyte), puis
+make itest                # 49 vérifications bout-en-bout (53 avec pyte),
+#                         # 15 sur le ciblage des sessions en CLI, puis
 #                         # 23 sur le renommage de session (make itest-rename)
 ```
 
@@ -49,7 +50,7 @@ rscreen                      # session « default », crée si besoin
 rscreen -S dev               # session « dev »
 rscreen -S dev -r            # s'y raccorder (sans en créer d'autre)
 rscreen -S build -c 'make -j8'   # première fenêtre : une commande précise
-rscreen -ls                  # lister les sessions
+rscreen -ls                  # lister les sessions (nom + pid)
 rscreen -S dev -L            # lister les fenêtres d'une session
 rscreen -S dev -d            # détacher (arrière-plan) sans se raccorder
 rscreen -S cron -dm -c 'make -j8'   # session démarrée sans terminal (arrière-plan)
@@ -58,6 +59,26 @@ rscreen -S dev -x            # tuer la session
 rscreen -S dev -X next       # piloter à distance (next prev other new select:N
                              #  detach kill redraw query)
 ```
+
+### Désigner une session : nom **ou** pid
+
+`rscreen -ls` donne le nom **et** le pid. Toute commande qui parle à une session
+accepte l'un ou l'autre, seul ou en positionnel — comme gnu-screen :
+
+```sh
+rscreen -r dev             # par son nom
+rscreen -r 12345           # par son pid, celui que `-ls` affiche
+rscreen -r 12345.pts-0     # même la forme « pid.machin » de gnu-screen
+rscreen -R 12345           # reprendre, sinon créer (jamais « default » par accident)
+rscreen dev               # un nom qui existe déjà : on vise la session, pas une commande
+rscreen -x 12345           # la tuer d'après son pid
+rscreen -r                 # unique session détachée : pas besoin de la nommer
+```
+
+Un positionnel ne devient une session que s'il en existe une de ce nom (ou de ce
+pid) ; sinon c'est une commande. Et si `-S` est déjà là,
+`rscreen -S autre -r 12345` refuse de trancher au lieu de deviner —
+`rscreen -ls` dit qui est qui.
 
 Sessions et sockets sont rangés dans `$XDG_RUNTIME_DIR/rscreen-<uid>`
 (ou `/tmp/rscreen-<uid>`), ou `$RSCREEN_DIR` si définie.
