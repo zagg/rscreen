@@ -45,6 +45,26 @@ rscreen -S cron -dm -c './nightly.sh'   # start detached, no terminal
 rscreen -S dev -x                # kill “dev”
 ```
 
+### Pointing at a session: name **or** pid
+
+`rscreen -ls` prints both the name **and** the pid, and every command that talks
+to a session takes either one, on its own or as a positional argument — like
+`screen` does:
+
+```sh
+rscreen -r dev             # by name
+rscreen -r 12345           # by pid, the one `-ls` shows
+rscreen -r 12345.pts-0     # even the “pid.whatever” screen form
+rscreen -R 12345           # resume, create if missing (never “default” by accident)
+rscreen dev                # an existing name: that's the session, not a command
+rscreen -x 12345           # kill it by pid
+rscreen -r                 # the single detached session: no name needed
+```
+
+A positional argument becomes a session only when one actually matches that name
+(or pid); otherwise it stays the command to run. And when `-S` is already there,
+`rscreen -S other -r 12345` refuses to guess — `rscreen -ls` says who is who.
+
 Inside a session, windows are driven with the `Ctrl+a` prefix:
 
 | after `Ctrl+a` | effect |

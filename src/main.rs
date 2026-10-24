@@ -19,7 +19,7 @@ use std::process::ExitCode;
 
 use crate::err::{msg, Result};
 
-const VERSION: &str = concat!("0.1.0 (", env!("CARGO_PKG_NAME"), ")");
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("CARGO_PKG_NAME"), ")");
 
 fn usage() {
     println!(
@@ -27,24 +27,29 @@ fn usage() {
         v = VERSION
     );
     println!(
-        "usage : rscreen [options] [commande]\n\
+        "usage : rscreen [options] [commande|session]\n\
          \n\
          \t-d                détacher la session (la laisser en arrière-plan)\n\
          \t-D                déconnecter les autres clients puis se raccorder\n\
-         \t-ls               lister les sessions\n\
+         \t-ls               lister les sessions (nom + pid)\n\
          \t-L                lister les fenêtres d'une session\n\
-         \t-r                se raccorder à une session existante (sans en créer)\n\
+         \t-r NOM|PID        se raccorder à une session existante, sans en créer\n\
+         \t-R NOM|PID        reprendre la session, ou la créer si elle manque\n\
          \t-S NOM            nom de la session (défaut : « {} »)\n\
          \t-c COMMANDE       commande lancée dans la première fenêtre\n\
          \t-t TITRE          titre de la première fenêtre\n\
          \t-m                démarrer la session en arrière-plan (sans terminal)\n\
-         \t-x                tuer la session\n\
+         \t-x NOM|PID        tuer la session\n\
          \t-X COMMANDE       envoyer une commande à la session (next prev other new\n\
          \t                  select:N detach kill redraw query)\n\
-         \t-R                reprendre ou créer la session\n\
          \t-H                historique par fenêtre (défaut 2000 lignes)\n\
          \t-h, --help        cette aide\n\
-         \t-V                version\n\
+         \t-V                version\n\n",
+        paths::DEFAULT_SESSION
+    );
+    println!(
+        "\tla session visée s'écrit indifféremment par son NOM, par son PID\n\
+         \tou par « PID.quelquechose » (ce que renvoie `rscreen -ls`)\n\
          \n\
          \tpendant la session :\n\
          \t  Ctrl+b puis a    sélecteur de sessions (fenêtre modale) : on se\n\
@@ -60,8 +65,9 @@ fn usage() {
          \t  rscreen -S dev              session « dev », 1 fenêtre shell\n\
          \t  rscreen -S dev -r           s'y raccorder (une autre fenêtre ouverte)\n\
          \t  rscreen -ls                 voir toutes les sessions\n\
-         \t  rscreen -S build -c 'make -j8'\n",
-        paths::DEFAULT_SESSION
+         \t  rscreen -r dev              s'y raccorder par son nom\n\
+         \t  rscreen -R 4213             s'y raccorder par son pid (colonne pid de -ls)\n\
+         \t  rscreen -S build -c 'make -j8'\n"
     );
 }
 
@@ -84,6 +90,8 @@ struct Opts {
     list: bool,
     list_win: bool,
     resume: bool,
+    /// `-R` : reprendre *ou* créer (la cible peut donc manquer)
+    resume_or_create: bool,
     detach: bool,
     detach_then_attach: bool,
     kill: bool,
@@ -91,19 +99,28 @@ struct Opts {
     remote: Option<String>,
     scrollback: usize,
     positional: Vec<String>,
+    /// `-S` réellement donné sur la ligne de commande
+    session_given: bool,
+    /// le nom vient de l'environnement (STY / RSCREEN_SESSION, session en cours)
+    session_from_env: bool,
 }
 
 impl Default for Opts {
     fn default() -> Opts {
+        let from_env = std::env::var("RSCREEN_SESSION")
+            .or_else(|_| std::env::var("STY"))
+            .ok();
         Opts {
-            session: std::env::var("RSCREEN_SESSION")
-                .or_else(|_| std::env::var("STY"))
-                .unwrap_or_else(|_| paths::DEFAULT_SESSION.to_string()),
+            session: from_env
+                .clone()
+                .unwrap_or_else(|| paths::DEFAULT_SESSION.to_string()),
+            session_from_env: from_env.is_some(),
             cmd: Vec::new(),
             title: String::new(),
             list: false,
             list_win: false,
             resume: false,
+            resume_or_create: false,
             detach: false,
             detach_then_attach: false,
             kill: false,
@@ -111,6 +128,7 @@ impl Default for Opts {
             remote: None,
             scrollback: 2000,
             positional: Vec::new(),
+            session_given: false,
         }
     }
 }
@@ -176,7 +194,10 @@ fn dispatch(args: &[String]) -> Result<()> {
                 };
                 let _ = &value;
                 match c {
-                    'S' => o.session = value.unwrap(),
+                    'S' => {
+                        o.session = value.unwrap();
+                        o.session_given = true;
+                    }
                     'c' => o.cmd = pty::split_command(&value.unwrap()),
                     't' => o.title = value.unwrap(),
                     'X' => o.remote = Some(value.unwrap()),
@@ -189,7 +210,10 @@ fn dispatch(args: &[String]) -> Result<()> {
                     'r' => o.resume = true,
                     'd' => o.detach = true,
                     'D' => o.detach_then_attach = true,
-                    'R' => o.resume = true,
+                    'R' => {
+                        o.resume = true;
+                        o.resume_or_create = true;
+                    }
                     'x' => o.kill = true,
                     'm' => o.background = true,
                     'V' => {
@@ -211,8 +235,53 @@ fn dispatch(args: &[String]) -> Result<()> {
         i += 1;
     }
 
+    // ---- à quelle session parle-t-on ? ------------------------------------
+    // un positionnel peut DÉSIGNER la session : nom, pid, ou « pid.suffixe »
+    // (c'est la colonne pid que renvoie `rscreen -ls`). Avec une option
+    // d'action, le positionnel est la cible, même si elle n'existe pas encore.
+    let action = o.resume || o.detach || o.detach_then_attach || o.kill || o.list_win;
+    if let Some(tok) = o.positional.first().cloned() {
+        match meta::find_session(&tok) {
+            Some(found) => {
+                if o.session_given && found != paths::sanitize(&o.session) {
+                    return Err(msg(format!(
+                        "deux cibles : -S « {} » et « {tok} » (en fait « {found} ») — gardez-en une seule",
+                        o.session
+                    )));
+                }
+                o.session = found;
+                o.session_given = true;
+                o.positional.remove(0);
+            }
+            None if action => {
+                if o.session_given {
+                    return Err(msg(format!(
+                        "« {tok} » n'est pas une session en vie, et -S impose déjà « {} »",
+                        o.session
+                    )));
+                }
+                o.session = tok;
+                o.session_given = true;
+                o.positional.remove(0);
+            }
+            None => {}
+        }
+    }
+    // `-r` tout seul : s'il n'y a qu'une session détachée, c'est évident
+    if !o.session_given && !o.session_from_env && o.positional.is_empty() && o.resume {
+        if let Some(m) = meta::only_detached() {
+            o.session = m.name.clone();
+            o.session_given = true;
+        }
+    }
+
     if o.cmd.is_empty() && !o.positional.is_empty() {
         o.cmd = o.positional.clone();
+    }
+    if o.resume && !o.resume_or_create && !o.cmd.is_empty() {
+        eprintln!(
+            "rscreen: commande ignorée (`-r` se contente de se raccorder) ; `rscreen -R` ou `-c` pour l'exécuter"
+        );
     }
 
     let session = paths::sanitize(&o.session);
@@ -240,7 +309,8 @@ fn dispatch(args: &[String]) -> Result<()> {
         session: session.clone(),
         cmd: o.cmd.clone(),
         title: o.title.clone(),
-        create: !o.resume,
+        // `-r` = reprise seule, `-R` = reprise ou création
+        create: !o.resume || o.resume_or_create,
         scrollback: o.scrollback,
         first_win: None,
     };

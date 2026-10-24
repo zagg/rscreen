@@ -190,6 +190,41 @@ pub fn all_sessions() -> Vec<SessionMeta> {
     out
 }
 
+/// retrouve le nom d'une session à partir d'un jeton saisi en CLI, à la
+/// gnu-screen : nom exact, pid (`72826`) ou « pid.suffixe » (`72826.pts-0`).
+/// `None` pour une session morte. Le nom logique prime si le répertoire a
+/// changé (session renommée à chaud).
+pub fn find_session(tok: &str) -> Option<String> {
+    let tok = tok.trim();
+    if tok.is_empty() {
+        return None;
+    }
+    let live = all_sessions();
+    // 1. nom tel quel, puis nom nettoye des caracteres interdits
+    let key = paths::sanitize(tok);
+    if let Some(m) = live.iter().find(|m| m.name == tok || m.name == key) {
+        return Some(m.name.clone());
+    }
+    // 2. par pid, avec ou sans suffixe facon gnu-screen
+    let head = tok.split('.').next().unwrap_or(tok);
+    if let Ok(pid) = head.parse::<i32>() {
+        if let Some(m) = live.iter().find(|m| m.pid == pid) {
+            return Some(m.name.clone());
+        }
+    }
+    None
+}
+
+/// la seule session détachée, s'il n'y en a qu'une (comportement `-r` seul).
+pub fn only_detached() -> Option<SessionMeta> {
+    let mut v = all_sessions().into_iter().filter(|m| m.attached == 0);
+    let one = v.next()?;
+    if v.next().is_some() {
+        return None;
+    }
+    Some(one)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,6 +1,6 @@
 [package]
 name = "rscreen"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Multiplexeur de terminal (clone de screen/gnu-screen) en Rust : fenêtres + sélecteur de sessions"
 license = "MIT"
