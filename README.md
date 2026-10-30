@@ -35,10 +35,11 @@
 ```sh
 cargo build --release     # cible : target/release/rscreen
 make install              # /usr/local/bin/rscreen
-make test                 # 11 tests unitaires
-make itest                # 49 vérifications bout-en-bout (53 avec pyte),
+make test                 # 12 tests unitaires
+make itest                # 55 vérifications bout-en-bout (60 avec pyte),
 #                         # 15 sur le ciblage des sessions en CLI, puis
 #                         # 23 sur le renommage de session (make itest-rename)
+make bench                # chemin chaud : coût du rendu, débit du serveur
 ```
 
 `rscreen` nécessite Linux (pty, `signalfd`, `TIOCGPTPEER`) et un terminal.
@@ -153,12 +154,23 @@ terminal réel  <->  client rscreen  <-> [socket unix]  serveur de session  <-> 
 * **Serveur** (`src/server.rs`) : une boucle `poll()` unique, sans thread
   additionnel. Il tient pour chaque fenêtre un émulateur VT100 (`vt100`), donc
   l'état complet de l'écran et un historique de 2000 lignes.
-* **Rendu** : le serveur connaît l'état du terminal du client (un `Screen` de
-  référence par client) et n'envoie que le **différentiel** — c'est ce qui rend
-  le basculement de fenêtre instantané et sans scintillement, et ce qui permet
-  de reprendre une session avec tout son contenu. La région de défilement du
-  terminal réel est bornée à la zone des fenêtres (`CSI 1;<n> r`) pour que la
-  barre de statut ne soit jamais touchée.
+* **Rendu** : le serveur connaît l'état du terminal du client et n'envoie que le
+  **différentiel** — c'est ce qui rend le basculement de fenêtre instantané et
+  sans scintillement, et ce qui permet de reprendre une session avec tout son
+  contenu. Le travail n'est pas fait par client mais par **vue** (quelle
+  fenêtre, à quel endroit de l'historique) : les clients d'une même vue
+  reçoivent la même trame et partagent le même instantané de référence (un
+  `Rc`, plus une copie), donc une fenêtre qui débite ne coûte qu'un diff et une
+  copie d'écran par frame, quel que soit le nombre de clients joints. Un client
+  désaccordé (arrivée en retard, changement de fenêtre, de taille, sortie
+  d'historique) reçoit un redraw total, qui le remet dans la vue ; et quand
+  plus personne ne regarde une fenêtre, l'instantané de son historique est
+  libéré. Mesure (`make bench`, µs par passe de rendu, 48×160, historique
+  2000) : 236 / 498 / 772 à 1, 2 puis 3 clients avant ce partage,
+  188 / 188 / 188 après.
+* **Zone de défilement** : la région de défilement du terminal réel est bornée à
+  la zone des fenêtres (`CSI 1;<n> r`) pour que la barre de statut ne soit
+  jamais touchée.
 * **Curseur** : la visibilité du curseur est celle de **l'application** (`DEC
   private mode 25`) — le serveur l'impose à chaque rendu complet et le client la
   suit dans le flux. rscreen ne le masque que pour les fenêtres modales
