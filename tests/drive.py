@@ -134,6 +134,31 @@ class Drive:
 RESULTS = []
 
 
+def drain(*ds, secs=1.2):
+    """lit les pty de tous les clients donnes pendant `secs` : le serveur est
+    monothread et ecrit client par client, donc si un seul socket n'est pas
+    vide, les autres clients attendent derriere lui"""
+    end = time.time() + secs
+    while time.time() < end:
+        for d in ds:
+            d.pump(0.05)
+
+
+def drain_until(*ds, needle, secs=6.0):
+    """pareil, jusqu'a ce que chaque client ait recu `needle` (ou qu'il soit
+    trop tard) : utile quand la machine est chargee et qu'un seul client
+    qui traine fige le rendu des autres"""
+    if isinstance(needle, str):
+        needle = needle.encode()
+    end = time.time() + secs
+    while time.time() < end:
+        for d in ds:
+            d.pump(0.05)
+        if all(needle in d.buf for d in ds):
+            return True
+    return False
+
+
 def check(name, cond):
     RESULTS.append((name, bool(cond)))
     print(("  OK   " if cond else "  ECHEC") + "  " + name)
@@ -333,6 +358,53 @@ def main():
     d3.send("echo APRHIST\r")
     check("saisie toujours possible", d3.expect(b"APRHIST", 3))
     d3.kill()
+
+    print("\n== 5bis. deux clients joints sur la MEME fenetre (vue partagee) ==")
+    e1 = Drive(["-S", "t1", "-r"])
+    e1.read_for(1.5)
+    e2 = Drive(["-S", "t1", "-r"])
+    e2.read_for(1.5)
+    e1.clear()
+    e2.clear()
+    e1.send("echo TWIN-MARK\r")
+    drain_until(e1, e2, needle=b"TWIN-MARK", secs=5.0)
+    check("les deux clients recoivent la meme sortie",
+          e1.at("TWIN-MARK") and e2.at("TWIN-MARK"))
+    # chez e2 seul on deroule l'historique : sa vue differe de celle d'e1
+    e2.send("\x01[")
+    check("le client qui deroule son passe en mode HISTORIQUE",
+          e2.expect(b"HISTORIQUE", 2))
+    e1.clear()
+    e2.clear()
+    e1.send("echo DIRECT-ENCORE\r")
+    drain(e1, e2, secs=3.0)
+    check("le client reste en direct suit toujours l'app", e1.at("DIRECT-ENCORE"))
+    # sortie d'historique chez e2 : redraw total, il doit rattraper le direct
+    e2.send("\x1b")
+    drain(e1, e2, secs=1.0)
+    e1.clear()
+    e2.clear()
+    e1.send("echo CONVERGENCE\r")
+    drain_until(e1, e2, needle=b"CONVERGENCE", secs=8.0)
+    check("e1 voit la nouvelle sortie", e1.at("CONVERGENCE"))
+    check("e2 a rattrape le direct apres son defilement", e2.at("CONVERGENCE"))
+    if e1.screen is not None and e2.screen is not None:
+        l1 = [r for r in e1.visible().splitlines() if "CONVERGENCE" in r]
+        l2 = [r for r in e2.visible().splitlines() if "CONVERGENCE" in r]
+        check("et affichent la meme ligne, cellule par cellule", bool(l1) and l1 == l2)
+    # un troisieme client arrive en retard : il doit rattraper, pas rester decale
+    e3 = Drive(["-S", "t1", "-r"])
+    e3.read_for(1.5)
+    e1.clear()
+    e2.clear()
+    e3.clear()
+    e1.send("echo TROISIEME-VOIT\r")
+    drain_until(e1, e2, e3, needle=b"TROISIEME-VOIT", secs=8.0)
+    check("le client arrive en retard rattrape le direct",
+          e3.at("TROISIEME-VOIT") and e2.at("TROISIEME-VOIT"))
+    e1.kill()
+    e2.kill()
+    e3.kill()
 
     print("\n== 6. tuer une fenetre et une session ==")
     d4 = Drive(["-S", "t3"])

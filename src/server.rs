@@ -3,6 +3,7 @@
 //! de la fenêtre visualisée (diffs de grille, comme tmux).
 
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::rc::Rc;
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -113,8 +114,42 @@ struct Win {
     master: OwnedFd,
     child: libc::pid_t,
     parser: vt100::Parser<WinCb>,
+    /// etat de reference de chaque vue rendue de cette fenetre : (defilement,
+    /// etat d'ecran envoye aux clients de cette vue a la passe precedente).
+    shots: Vec<(usize, Rc<vt100::Screen>)>,
     kitty: u32,
     scan: KittyScan,
+}
+
+/// Les clients d'une meme vue (fenetre + defilement) recoivent la meme trame.
+struct Group {
+    wi: usize,
+    scroll: usize,
+    /// etat de reference de la vue, laisse par la passe precedente
+    base: Option<Rc<vt100::Screen>>,
+    /// clients deja a jour de `base` : ils recoivent le diff
+    sync: Vec<usize>,
+    /// clients en retard : ils recoivent un redraw total
+    lagging: Vec<usize>,
+}
+
+/// Une vue rendue : la trame toute encodee pour les clients a jour (`diff`),
+/// celle pour les clients en retard (`full`), et l'etat que l'une ou l'autre
+/// produit a l'ecran (la reference de la prochaine passe).
+struct View {
+    diff: Vec<u8>,
+    full: Vec<u8>,
+    snap: Rc<vt100::Screen>,
+}
+
+/// une trame `Data` vide ne part pas sur le socket
+fn encode(txt: String) -> Vec<u8> {
+    if txt.is_empty() {
+        return Vec::new();
+    }
+    let mut payload = Vec::with_capacity(txt.len() + 5);
+    SMsg::Data(txt.into_bytes()).write_to(&mut payload);
+    payload
 }
 
 struct Client {
@@ -122,7 +157,7 @@ struct Client {
     writer: UnixStream,
     rbuf: Vec<u8>,
     out: Vec<u8>,
-    prev: Option<vt100::Screen>,
+    prev: Option<Rc<vt100::Screen>>,
     need_full: bool,
     viewing: u32,
     scroll: usize,
@@ -272,6 +307,7 @@ impl Server {
                 WinCb::default(),
             ),
             kitty: 0,
+            shots: Vec::new(),
             scan: KittyScan::default(),
         });
         if self.wins.len() == 1 {
@@ -538,6 +574,24 @@ impl Server {
     }
 
     fn render(&mut self) {
+        // Une vue = (fenetre, degre de defilement). Tous les clients d'une vue
+        // doivent recevoir exactement la meme trame : clone d'ecran, diff et
+        // encodage ne sont donc faits qu'une fois par vue et par passe, au lieu
+        // d'une fois par client. Le clone d'un `Screen` copie les deux grilles
+        // ET tout le scrollback (~10 Mo et ~2000 `Vec` avec -H 2000) pour
+        // n'afficher que 48x160 cellules (245 Ko) : ce cout etait jusqu'ici
+        // multiplie par le nombre de clients joints.
+        //
+        // `Win::shots` conserve l'etat de reference de chaque vue : ce que la
+        // passe precedente a envoye a *tous* les clients de cette vue. Un
+        // client dont le « prev » est ce meme objet (`Rc::ptr_eq`, temoin
+        // d'identite et non de contenu) est a jour : il recoit le diff. Un
+        // client en retard (nouvelle venue, changement de fenetre, de taille,
+        // de defilement, ou simple desynchronisation) recoit un redraw total :
+        // comme les deux trames produisent le meme etat, la vue se converge
+        // d'elle-meme et tout le monde repart du meme instantane a la passe
+        // suivante.
+        let mut groups: Vec<Group> = Vec::new();
         for ci in 0..self.clients.len() {
             if !self.clients[ci].alive {
                 continue;
@@ -548,45 +602,115 @@ impl Server {
                 None => continue,
             };
             let scroll = self.clients[ci].scroll;
-            if scroll > 0 {
-                let len = self.wins[wi].parser.screen().scrollback_len();
-                self.wins[wi]
-                    .parser
-                    .screen_mut()
-                    .set_scrollback(len.min(scroll));
-            }
-            let full = self.clients[ci].need_full || self.clients[ci].prev.is_none();
-            let (txt, snap) = {
-                let w = &self.wins[wi];
-                let s = w.parser.screen();
-                let (rows, cols) = s.size();
-                let mut txt = String::new();
-                if full {
-                    let blank = vt100::Parser::new(rows, cols, 0);
-                    txt.push_str("\x1b[0m\x1b[39;49m\x1b[?7h\x1b[H\x1b[2J");
-                    txt.push_str(&s.state_diff(blank.screen()));
-                    // un ecran vide est cense avoir le curseur visible : le diff
-                    // ne dirait jamais rien si l'app le cache. On impose etat.
-                    txt.push_str(if s.hide_cursor() {
-                        "\x1b[?25l"
-                    } else {
-                        "\x1b[?25h"
+            let gi = match groups.iter().position(|g| g.wi == wi && g.scroll == scroll) {
+                Some(i) => i,
+                None => {
+                    let base = self.wins[wi]
+                        .shots
+                        .iter()
+                        .find(|(s, _)| *s == scroll)
+                        .map(|(_, p)| p.clone());
+                    groups.push(Group {
+                        wi,
+                        scroll,
+                        base,
+                        sync: Vec::new(),
+                        lagging: Vec::new(),
                     });
-                } else if let Some(prev) = self.clients[ci].prev.as_ref() {
-                    txt.push_str(&s.state_diff(prev));
+                    groups.len() - 1
                 }
-                (txt, s.clone())
             };
-            if scroll > 0 {
-                self.wins[wi].parser.screen_mut().set_scrollback(0);
+            let uptodate = match (&self.clients[ci].prev, &groups[gi].base) {
+                (Some(p), Some(b)) => Rc::ptr_eq(p, b),
+                _ => false,
+            };
+            if self.clients[ci].need_full || !uptodate {
+                groups[gi].lagging.push(ci);
+            } else {
+                groups[gi].sync.push(ci);
             }
-            if !txt.is_empty() {
-                SMsg::Data(txt.into_bytes()).write_to(&mut self.clients[ci].out);
+        }
+        // des qu'aucun client ne regarde une fenetre (ou un defilement donne),
+        // sa reference est lachee : c'est ce qui rend l'historique a un gros
+        // scrollback quand la session passe en arriere-plan.
+        for w in self.wins.iter_mut() {
+            w.shots.clear();
+        }
+        for g in groups.iter() {
+            let view = self.render_view(
+                g.wi,
+                g.base.as_deref(),
+                g.scroll,
+                !g.sync.is_empty(),
+                !g.lagging.is_empty(),
+            );
+            let View { diff, full, snap } = view;
+            for (buf, list) in [(&diff, &g.sync), (&full, &g.lagging)] {
+                for &ci in list.iter() {
+                    let c = &mut self.clients[ci];
+                    if !buf.is_empty() {
+                        c.out.extend_from_slice(buf);
+                    }
+                    c.prev = Some(snap.clone());
+                    c.need_full = false;
+                }
             }
-            self.clients[ci].prev = Some(snap);
-            self.clients[ci].need_full = false;
+            self.wins[g.wi].shots.push((g.scroll, snap));
         }
         self.render_needed = false;
+    }
+
+    /// la trame d'une vue, calculee depuis `base` (None = repartir d'un ecran
+    /// vide) vers l'etat courant de la fenetre `wi` au defilement `scroll`.
+    /// `want_diff`/`want_full` evitent de calculer une trame que personne ne
+    /// demande, et les deux aboutissent au meme `snap` partage par `Rc`.
+    fn render_view(
+        &mut self,
+        wi: usize,
+        base: Option<&vt100::Screen>,
+        scroll: usize,
+        want_diff: bool,
+        want_full: bool,
+    ) -> View {
+        if scroll > 0 {
+            let len = self.wins[wi].parser.screen().scrollback_len();
+            self.wins[wi]
+                .parser
+                .screen_mut()
+                .set_scrollback(len.min(scroll));
+        }
+        let (diff, full, snap) = {
+            let s = self.wins[wi].parser.screen();
+            let (rows, cols) = s.size();
+            let mut diff = String::new();
+            let mut full = String::new();
+            if want_diff {
+                if let Some(prev) = base {
+                    diff.push_str(&s.state_diff(prev));
+                }
+            }
+            if want_full {
+                let blank = vt100::Parser::new(rows, cols, 0);
+                full.push_str("\x1b[0m\x1b[39;49m\x1b[?7h\x1b[H\x1b[2J");
+                full.push_str(&s.state_diff(blank.screen()));
+                // un ecran vide est cense avoir le curseur visible : le diff
+                // ne dirait jamais rien si l'app le cache. On impose etat.
+                full.push_str(if s.hide_cursor() {
+                    "\x1b[?25l"
+                } else {
+                    "\x1b[?25h"
+                });
+            }
+            (
+                encode(diff),
+                encode(full),
+                Rc::new(s.clone()),
+            )
+        };
+        if scroll > 0 {
+            self.wins[wi].parser.screen_mut().set_scrollback(0);
+        }
+        View { diff, full, snap }
     }
 
     /// rebaptiser la session : son répertoire devient son nouveau nom. Le
@@ -637,17 +761,10 @@ impl Server {
                 c.out.clear();
                 continue;
             }
-            match c.writer.try_clone() {
-                Ok(mut s) => {
-                    if let Err(e) = proto::write_all_frames(&mut s, &mut c.out) {
-                        dbgln(&format!(
-                            "écriture client perdue ({e}) — on draine ses messages"
-                        ));
-                        c.silent = true;
-                        c.out.clear();
-                    }
-                }
-                Err(_) => c.alive = false,
+            if let Err(e) = proto::write_all_frames(&mut c.writer, &mut c.out) {
+                dbgln(&format!("écriture client perdue ({e}) — on draine ses messages"));
+                c.silent = true;
+                c.out.clear();
             }
         }
         let before = self.clients.len();

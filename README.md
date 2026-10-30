@@ -90,9 +90,17 @@ real terminal ⟷ rscreen client ⟷ unix socket ⟷ session server ⟷ window p
 
 The server keeps a **VT100 emulator** (`vt100`) for every window, so it knows
 the exact state of each screen. It never replays or summarizes — it sends the
-client only the **diff** against the client's own reference screen. Hence
-instant rejoin, flicker-free window switching, and the fact that disconnecting
-changes nothing: nothing is “replayed”, everything is already there.
+client only the **diff** against the screen state that client was last given.
+Hence instant rejoin, flicker-free window switching, and the fact that
+disconnecting changes nothing: nothing is “replayed”, everything is already
+there.
+
+That work happens once per **view** — a view being *(window, scroll position)*
+— rather than once per attached client: everyone watching the same view gets
+the same frame and shares one reference snapshot. A client out of step (just
+joined, changed window, size or scroll offset, asked for `Ctrl+a l`) receives a
+full redraw instead, which puts it back in step. See *Rendering* below for why
+that convergence matters and what it costs.
 
 Sessions are self-contained: each server stores `sock`, `pid` and `state` in
 its directory, and clients enumerate them by scanning that directory (killing
@@ -103,6 +111,27 @@ clients live on.
 <details>
 <summary>More technical detail (keyboard, kitty protocol, rendering…)</summary>
 
+* **Rendering: a frame per view, not per client.** Cloning a `vt100::Screen`
+  copies both grids *and the whole scrollback* — ~10 MB and ~2 000 `Vec`s at
+  the default `-H 2000` — to show 48×160 cells (245 KB). That used to be paid
+  once per client, 90 times a second. So the reference screen now belongs to
+  the view (`Win::shots`): the diff, the snapshot and the encoded frame are
+  computed once per view per pass and shared by `Rc`; two clients out of two
+  different snapshots would never share anything, which is exactly why the
+  lagging client is given a full redraw — both paths land on the same state,
+  so the view converges. Snapshots of views nobody watches are released.
+  Measured cost of one render pass (48×160, `-H 2000`, a window flooding
+  output, `make bench`):
+
+  | clients attached | before | after |
+  |---|---|---|
+  | 1 | 236 µs | 188 µs |
+  | 2 | 498 µs | 188 µs |
+  | 3 | 772 µs | 188 µs |
+
+  End to end, the server now recaches as much application output with two
+  clients as with one (4.18 → 4.16 MB/s at 100 % CPU): the photocopy is no
+  longer the bottleneck.
 * **Cursor**: visibility belongs to the **application** (`DECSI 25`), not to
   rscreen — the server enforces it on every full render. rscreen hides it only
   inside its own modal overlays.
@@ -126,6 +155,9 @@ clients live on.
 ```sh
 make test       # unit tests (rendering, keys, state machines…)
 make itest      # end-to-end: rscreen driven inside real ptys
+                # 55 checks (60 with pyte), 15 on session targeting,
+                # 23 on renaming a session from the picker
+make bench      # hot path: cost of a render pass, server throughput (1–3 clients)
 make dump       # replays the client's screen into a VT emulator (pyte)
 ```
 
