@@ -1,207 +1,175 @@
 # rscreen
 
-`rscreen` est une réécriture de **gnu-screen** (le multiplexeur de terminal) en
-**Rust**, sans dépendance externe autre que `libc`, `vt100` (émulation VT100) et
-`unicode-width` :
+> Also available in French: [README.fr.md](README.fr.md)
 
-* chaque **session** tourne dans un processus serveur détaché : elle survit à la
-  fermeture du terminal, aux déconnexions, à `SIGHUP` ;
-* chaque session héberge des **fenêtres** (un shell, un build, `htop`… chacun
-  dans son propre pty) ;
-* **`Tab`** et **`Maj+Tab`** ne sont **pas capturées** : elles partent telles
-  quelles vers l'application tenue par la fenêtre (complétion du shell, TAB
-  d'un éditeur, touches de navigation…). Changer de fenêtre se fait avec
-  **`Ctrl+a n`** / **`Ctrl+a p`** ou les chiffres **`0`…`9`** ;
-* **`Ctrl+b` puis `a`** ouvre une **fenêtre modale listant les sessions** : on
-  se déplace avec les touches **`↑`** et **`↓`**, on valide avec **`Entrée`**.
-  La liste propose les sessions actives (et leurs fenêtres), « + nouvelle
-  session… », « ← retour au shell » et « ⤳ rester en arrière-plan » (détacher).
+**A `gnu-screen` clone written in Rust**: every session survives dropped
+connections, every session hosts windows, and a modal picker lists them all —
+all inside your terminal, with zero flicker.
 
-```
-┌ sélecteur de sessions — 2 sessions · ligne 1/7──────────────────────┐
-│▸▾ dev   ← courante                48×160 · 3 fen. · pid 4242 · JOINTE│
-│      • 0   bash                                                     │
-│        1   cargo watch                                              │
-│      ▸ build                        48×160 · 1 fen. · pid 4300 · ARRIÈRE-PLAN
-│  + nouvelle session…                                                │
-│  ← retour au shell                                           Entrée  │
-│  ⤳ rester en arrière-plan (détacher ce terminal)            Ctrl+a d │
-└─────────────────────────────────────────────────────────────────────┘
- rscreen « dev » [jointe]  0 bash  1 cargo watch  2 htop     18:42 160×48
-```
+![rscreen: session picker over htop](docs/screenshot.png)
 
-## Construction
+*(rscreen in a real terminal: `htop` in the “benchmarking” window, the session
+picker open on top of it.)*
+
+`rscreen` is the `screen` you actually want to restart: one small binary, three
+dependencies (`libc`, `vt100`, `unicode-width`), zero configuration.
+
+| | |
+|---|---|
+| 💨 SSH died? Session lives | one detached server per session |
+| 🪟 Multiple windows | a shell, a build, `htop`… each in its own pty |
+| 🗂️ Session picker | `Ctrl+b` then `a`: modal list, expand/collapse, rename (`r`) |
+| ⚡ Zero flicker | **diff-rect** rendering: only what changed hits the screen |
+| ⇥ `Tab` belongs to apps | bash completion, vim TAB, editor navigation… untouched |
+| 🔁 Hot switching | jumping `dev` → `build` never resets the terminal |
+| 🪶 Featherweight | `libc` + `vt100` + `unicode-width`, that's all |
+
+## Install
 
 ```sh
-cargo build --release     # cible : target/release/rscreen
-make install              # /usr/local/bin/rscreen
-make test                 # 12 tests unitaires
-make itest                # 55 vérifications bout-en-bout (60 avec pyte),
-#                         # 15 sur le ciblage des sessions en CLI, puis
-#                         # 23 sur le renommage de session (make itest-rename)
-make bench                # chemin chaud : coût du rendu, débit du serveur
+cargo build --release            # one binary: target/release/rscreen
+make install                     # → /usr/local/bin/rscreen
 ```
 
-`rscreen` nécessite Linux (pty, `signalfd`, `TIOCGPTPEER`) et un terminal.
+Linux only (ptys, `signalfd`, `TIOCGPTPEER`). Nothing to configure: sessions
+live in `$XDG_RUNTIME_DIR/rscreen-<uid>` (or `/tmp/rscreen-<uid>`,
+or `$RSCREEN_DIR`). Prebuilt binaries are in the [releases](releases).
 
-## Utilisation
+## Quick start
 
 ```sh
-rscreen                      # session « default », crée si besoin
-rscreen -S dev               # session « dev »
-rscreen -S dev -r            # s'y raccorder (sans en créer d'autre)
-rscreen -S build -c 'make -j8'   # première fenêtre : une commande précise
-rscreen -ls                  # lister les sessions (nom + pid)
-rscreen -S dev -L            # lister les fenêtres d'une session
-rscreen -S dev -d            # détacher (arrière-plan) sans se raccorder
-rscreen -S cron -dm -c 'make -j8'   # session démarrée sans terminal (arrière-plan)
-rscreen -D -S dev            # éjecter les autres clients puis se raccorder
-rscreen -S dev -x            # tuer la session
-rscreen -S dev -X next       # piloter à distance (next prev other new select:N
-                             #  detach kill redraw query)
+rscreen                          # session “default”, created if missing
+rscreen -S dev                   # session “dev”
+rscreen                          # from another box: “dev” finds you back
+rscreen -ls                      # list sessions
+rscreen -S dev -c 'make -j8'     # first window: a specific command
+rscreen -S cron -dm -c './nightly.sh'   # start detached, no terminal
+rscreen -S dev -x                # kill “dev”
 ```
 
-### Désigner une session : nom **ou** pid
+### Pointing at a session: name **or** pid
 
-`rscreen -ls` donne le nom **et** le pid. Toute commande qui parle à une session
-accepte l'un ou l'autre, seul ou en positionnel — comme gnu-screen :
+`rscreen -ls` prints both the name **and** the pid, and every command that talks
+to a session takes either one, on its own or as a positional argument — like
+`screen` does:
 
 ```sh
-rscreen -r dev             # par son nom
-rscreen -r 12345           # par son pid, celui que `-ls` affiche
-rscreen -r 12345.pts-0     # même la forme « pid.machin » de gnu-screen
-rscreen -R 12345           # reprendre, sinon créer (jamais « default » par accident)
-rscreen dev               # un nom qui existe déjà : on vise la session, pas une commande
-rscreen -x 12345           # la tuer d'après son pid
-rscreen -r                 # unique session détachée : pas besoin de la nommer
+rscreen -r dev             # by name
+rscreen -r 12345           # by pid, the one `-ls` shows
+rscreen -r 12345.pts-0     # even the “pid.whatever” screen form
+rscreen -R 12345           # resume, create if missing (never “default” by accident)
+rscreen dev                # an existing name: that's the session, not a command
+rscreen -x 12345           # kill it by pid
+rscreen -r                 # the single detached session: no name needed
 ```
 
-Un positionnel ne devient une session que s'il en existe une de ce nom (ou de ce
-pid) ; sinon c'est une commande. Et si `-S` est déjà là,
-`rscreen -S autre -r 12345` refuse de trancher au lieu de deviner —
-`rscreen -ls` dit qui est qui.
+A positional argument becomes a session only when one actually matches that name
+(or pid); otherwise it stays the command to run. And when `-S` is already there,
+`rscreen -S other -r 12345` refuses to guess — `rscreen -ls` says who is who.
 
-Sessions et sockets sont rangés dans `$XDG_RUNTIME_DIR/rscreen-<uid>`
-(ou `/tmp/rscreen-<uid>`), ou `$RSCREEN_DIR` si définie.
+Inside a session, windows are driven with the `Ctrl+a` prefix:
 
-Avec `RSCREEN_DEBUG=1`, le serveur d'une session écrit ses traces dans
-`$RSCREEN_DIR/debug.log` (pratique pour comprendre une session récalcitrante).
+| after `Ctrl+a` | effect |
+|---|---|
+| `n` / `p` / `0`…`9` | next / previous / Nth window |
+| `c` | new window |
+| `d` | detach (session keeps running) |
+| `w` | **session picker** — same as `Ctrl+b` then `a` |
+| `k` / `x` | kill window / session |
+| `[` | scrollback (`↑ ↓ PgUp PgDn`) |
+| `t` | session status · `?` help |
 
-## Raccourcis
+The picker (`Ctrl+b` `a`, or `w`) is real modal navigation: `↑` `↓` to move,
+`→` to expand a session's windows, `Enter` to join, `r` to rename, `d` to
+background, `x` to kill, `n` for a new one. That's all — `Tab` still belongs
+to the app.
 
-| touche          | effet                                                    |
-|-----------------|----------------------------------------------------------|
-| `Ctrl+b` puis `a` | **fenêtre modale : sélecteur de sessions** (↑ ↓ puis Entrée) |
-| `Ctrl+Entrée`   | détacher : la session repasse en arrière-plan             |
-| `Ctrl+a`        | préfixe à la gnu-screen (puis une des touches ci-dessous) |
-| `Tab` / `Maj+Tab` | **rendues à l'application** : rscreen ne les capture plus |
-
-Après le préfixe `Ctrl+a` :
-
-| touche     | effet                                            |
-|------------|--------------------------------------------------|
-| `a`        | envoyer un vrai `Ctrl+a`                          |
-| `Tab`      | envoyer une vraie tabulation (complétion shell)   |
-| `n`/`p`    | fenêtre suivante / précédente                     |
-| `0`…`9`    | aller à la fenêtre N                              |
-| `Ctrl+a`   | revenir à la fenêtre précédente (`other`)         |
-| `w` ou `"` | sélecteur de sessions — même effet que `Ctrl+b` puis `a` |
-| `c` / `C`  | nouvelle fenêtre / nouvelle fenêtre avec commande  |
-| `k` / `x`  | tuer la fenêtre / tuer la session (confirmation)  |
-| `r`        | renommer la fenêtre                               |
-| `d` / `D`  | détacher / éjecter les autres clients              |
-| `[`        | mode historique (`↑ ↓ PgUp PgDn Début`, Échap sortir) |
-| `l`        | redessiner l'écran                                |
-| `t`        | état de la session                                |
-| `?` / `h`  | aide                                              |
-
-### Dans la fenêtre modale du sélecteur
-
-La liste, dans l'ordre :
-
-1. les **sessions actives** — déplier une session avec `→` donne ses fenêtres,
-   `r` la rebaptise ;
-2. **`+ nouvelle session…`** — nom à saisir, la session est créée puis rejointe ;
-3. **`← retour au shell`** — referme la fenêtre sans rien changer ;
-4. **`⤳ rester en arrière-plan`** — détache ce terminal, la session continue.
-
-On se déplace avec **`↑` / `↓`** (et `PgPr` `PgSu` `Début` `Fin`, ou `j` `k`),
-**`Entrée` valide** la ligne surlignée. Les autres touches : `←` `→` pour
-replier/déplier, `r` pour **renommer** la session surlignée, `d` pour mettre une
-session en arrière-plan, `x` pour la tuer, `n` pour en créer une nouvelle,
-`Échap` (ou `Ctrl+b` puis `a` une seconde fois) pour refermer.
-
-### Renommer une session (`r` dans le sélecteur)
-
-Le nom d'une session est le **répertoire** qui la contient
-(`$XDG_RUNTIME_DIR/rscreen-<uid>/NOM`). Ce n'est donc pas une simple étiquette :
-c'est le serveur qui renomme son propre répertoire, et le socket suit le
-mouvement (un `rename` laisse le même inode) — les clients déjà branchés
-vivent toujours, les prochains se branchent sur le nouveau chemin. Les fenêtres
-déjà ouvertes gardent leur `STY` hérité, les nouvelles fenêtres le reçoivent.
-Nom vide, nom identique ou nom déjà pris sont refusés.
-
-## Comment ça marche
+## How it holds together
 
 ```
-terminal réel  <->  client rscreen  <-> [socket unix]  serveur de session  <-> ptys des fenêtres
+real terminal ⟷ rscreen client ⟷ unix socket ⟷ session server ⟷ window ptys
 ```
 
-* ***Client** (`src/client.rs`) : met le terminal en mode raw, écran alternatif,
-  réserve la dernière ligne pour sa barre de statut (fenêtres, session, messages,
-  horloge), décode les touches, gère préfixe/sélecteur/historique, et ne fait
-  qu'écrire les octets que le serveur lui envoie.
-* **Serveur** (`src/server.rs`) : une boucle `poll()` unique, sans thread
-  additionnel. Il tient pour chaque fenêtre un émulateur VT100 (`vt100`), donc
-  l'état complet de l'écran et un historique de 2000 lignes.
-* **Rendu** : le serveur connaît l'état du terminal du client et n'envoie que le
-  **différentiel** — c'est ce qui rend le basculement de fenêtre instantané et
-  sans scintillement, et ce qui permet de reprendre une session avec tout son
-  contenu. Le travail n'est pas fait par client mais par **vue** (quelle
-  fenêtre, à quel endroit de l'historique) : les clients d'une même vue
-  reçoivent la même trame et partagent le même instantané de référence (un
-  `Rc`, plus une copie), donc une fenêtre qui débite ne coûte qu'un diff et une
-  copie d'écran par frame, quel que soit le nombre de clients joints. Un client
-  désaccordé (arrivée en retard, changement de fenêtre, de taille, sortie
-  d'historique) reçoit un redraw total, qui le remet dans la vue ; et quand
-  plus personne ne regarde une fenêtre, l'instantané de son historique est
-  libéré. Mesure (`make bench`, µs par passe de rendu, 48×160, historique
-  2000) : 236 / 498 / 772 à 1, 2 puis 3 clients avant ce partage,
-  188 / 188 / 188 après.
-* **Zone de défilement** : la région de défilement du terminal réel est bornée à
-  la zone des fenêtres (`CSI 1;<n> r`) pour que la barre de statut ne soit
-  jamais touchée.
-* **Curseur** : la visibilité du curseur est celle de **l'application** (`DEC
-  private mode 25`) — le serveur l'impose à chaque rendu complet et le client la
-  suit dans le flux. rscreen ne le masque que pour les fenêtres modales
-  (sélecteur, aide, saisie, historique) et le rend à la fermeture.
-* **Clavier** : les deux seules touches « métier » du client sont `Ctrl+a`
-  (préfixe) et le duo `Ctrl+b` puis `a` (sélecteur) — toutes deux composées
-  d'octets de contrôle classiques, donc disponibles sur **n'importe quel**
-  terminal, y compris ceux qui ne savent pas envoyer `Ctrl+Tab`. Puisque `Tab`
-  n'est plus capturée, rscreen peut rendre `Ctrl+b` à l'application dès que le
-  deuxième touche tarde (300 ms) : readline garde sa flèche gauche.
-  Le client interroge tout de même le *kitty keyboard protocol* (`CSI ? u`) et
-  l'active (`CSI > 1 u`) si le terminal le parle : cela permet de reconnaître
-  `Ctrl+Entrée` (détacher) et de retraduire les touches étendues en octets
-  legacy pour les applications internes (bash, vim…). Si l'application d'une
-  fenêtre demande elle-même le protocole kitty, la traduction est désactivée
-  pour cette fenêtre et la requête de l'application reçoit du serveur la
-  réponse adaptée.
-* **Sessions** : chaque serveur écrit `sock`, `pid` et `state` dans son
-  répertoire ; le client balaie ce répertoire pour construire la liste du
-  sélecteur (et purge les sessions mortes). Basculer d'une session à l'autre se
-  fait à chaud, sans clignotement ni nouvelle initialisation du terminal.
+The server keeps a **VT100 emulator** (`vt100`) for every window, so it knows
+the exact state of each screen. It never replays or summarizes — it sends the
+client only the **diff** against the screen state that client was last given.
+Hence instant rejoin, flicker-free window switching, and the fact that
+disconnecting changes nothing: nothing is “replayed”, everything is already
+there.
 
-## Limit assumées
+That work happens once per **view** — a view being *(window, scroll position)*
+— rather than once per attached client: everyone watching the same view gets
+the same frame and shares one reference snapshot. A client out of step (just
+joined, changed window, size or scroll offset, asked for `Ctrl+a l`) receives a
+full redraw instead, which puts it back in step. See *Rendering* below for why
+that convergence matters and what it costs.
 
-* pas de découpage d'un écran en plusieurs panneaux (`split`) : les fenêtres
-  prennent tout l'espace, comme gnu-screen ;
-* pas de mode copie/collage avec sélection au caractère (l'historique est
-  consultable mais pas copiable) ;
-* plusieurs clients raccordés à une même session se suivent (même fenêtre
-  active), à la manière de `screen` en mode multi-terminaux.
+Sessions are self-contained: each server stores `sock`, `pid` and `state` in
+its directory, and clients enumerate them by scanning that directory (killing
+dead sessions on the way). Renaming a session is a real `rename(2)` on its
+directory — the socket follows without changing inode, and already-connected
+clients live on.
 
-## Licence
+<details>
+<summary>More technical detail (keyboard, kitty protocol, rendering…)</summary>
 
-MIT.
+* **Rendering: a frame per view, not per client.** Cloning a `vt100::Screen`
+  copies both grids *and the whole scrollback* — ~10 MB and ~2 000 `Vec`s at
+  the default `-H 2000` — to show 48×160 cells (245 KB). That used to be paid
+  once per client, 90 times a second. So the reference screen now belongs to
+  the view (`Win::shots`): the diff, the snapshot and the encoded frame are
+  computed once per view per pass and shared by `Rc`; two clients out of two
+  different snapshots would never share anything, which is exactly why the
+  lagging client is given a full redraw — both paths land on the same state,
+  so the view converges. Snapshots of views nobody watches are released.
+  Measured cost of one render pass (48×160, `-H 2000`, a window flooding
+  output, `make bench`):
+
+  | clients attached | before | after |
+  |---|---|---|
+  | 1 | 236 µs | 188 µs |
+  | 2 | 498 µs | 188 µs |
+  | 3 | 772 µs | 188 µs |
+
+  End to end, the server now recaches as much application output with two
+  clients as with one (4.18 → 4.16 MB/s at 100 % CPU): the photocopy is no
+  longer the bottleneck.
+* **Cursor**: visibility belongs to the **application** (`DECSI 25`), not to
+  rscreen — the server enforces it on every full render. rscreen hides it only
+  inside its own modal overlays.
+* **Keyboard**: only two keys are ever “claimed” — `Ctrl+a` (prefix, like
+  gnu-screen) and the `Ctrl+b`-then-`a` pair (picker). Both are plain control
+  bytes, so they work on any terminal, including ones that can't send
+  `Ctrl+Tab`. Since `Tab` is no longer captured, a lone `Ctrl+b` is returned
+  to the app after 300 ms: readline keeps its backward-char.
+* **kitty keyboard protocol**: the client probes (`CSI ? u`) and activates
+  (`CSI > 1 u`) when the terminal speaks it — enabling `Ctrl+Enter` (detach)
+  and translating extended keys back to legacy bytes for inner apps. If a
+  window's app requests the protocol itself, translation is disabled for that
+  window and the app's query gets a proper answer.
+* **Status line**: the last line is reserved by the client; the real
+  terminal's scroll region is bounded (`CSI 1;<n> r`) so renders never touch it.
+* **Sessions**: switching between sessions is hot — no terminal re-init.
+</details>
+
+## Testing
+
+```sh
+make test       # unit tests (rendering, keys, state machines…)
+make itest      # end-to-end: rscreen driven inside real ptys
+                # 55 checks (60 with pyte), 15 on session targeting,
+                # 23 on renaming a session from the picker
+make bench      # hot path: cost of a render pass, server throughput (1–3 clients)
+make dump       # replays the client's screen into a VT emulator (pyte)
+```
+
+## Known limitations
+
+* no `split` (side-by-side panes) — windows take the whole screen, like gnu-screen;
+* no character-wise selection: the scrollback is readable, not copyable;
+* multiple clients on one session share the same active window, like `screen`
+  in multi-terminal mode.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
