@@ -157,7 +157,7 @@ clients live on.
 ```sh
 make test       # unit tests (rendering, keys, state machines…)
 make itest      # end-to-end: rscreen driven inside real ptys
-                # 55 checks (60 with pyte), 15 on session targeting,
+                # 55 checks (60 with pyte), 16 on session targeting,
                 # 23 on renaming a session from the picker
 make bench      # hot path: cost of a render pass, server throughput (1–3 clients)
 make dump       # replays the client's screen into a VT emulator (pyte)

@@ -39,7 +39,7 @@ cargo build --release     # cible : target/release/rscreen
 make install              # /usr/local/bin/rscreen
 make test                 # 12 tests unitaires
 make itest                # 55 vérifications bout-en-bout (60 avec pyte),
-#                         # 15 sur le ciblage des sessions en CLI, puis
+#                         # 16 sur le ciblage des sessions en CLI, puis
 #                         # 23 sur le renommage de session (make itest-rename)
 make bench                # chemin chaud : coût du rendu, débit du serveur
 ```

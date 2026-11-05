@@ -25,7 +25,7 @@ itest: release itest-cli
 	RSCREEN=$(TARGET) python3 tests/drive.py
 	RSCREEN=$(TARGET) python3 tests/rename.py
 
-## ciblage de session en CLI : nom, pid, `pid.machin`, `-r` seul (15 vérifs)
+## ciblage de session en CLI : nom, pid, `pid.machin`, `-r` seul (16 vérifs)
 itest-cli: release
 	RSCREEN=$(TARGET) python3 tests/cli.py
 

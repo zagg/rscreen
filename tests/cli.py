@@ -7,6 +7,7 @@ retrouver le nom `-S`."""
 import os
 import re
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from drive import BIN, Drive, check, sh  # noqa: E402
@@ -20,7 +21,7 @@ def pid_of(name):
 
 def main():
     print("== ciblage de session depuis la CLI ==")
-    for n in ("zoulou", "cibled"):
+    for n in ("zoulou", "zoulou2", "cibled"):
         sh(BIN, "-S", n, "-x")
 
     sh(BIN, "-S", "zoulou", "-m", "-c", "sleep 300")
@@ -88,6 +89,23 @@ def main():
     # 10. `-x <pid>` tue la session designee par son pid
     sh(BIN, "-S", "zoulou", "-x", str(pid))
     check("-x <pid> tue la session visee", "zoulou" not in sh(BIN, "-ls"))
+
+    # 11. EOF sur le stdin : le client doit rendre la main, pas tourner en boucle
+    sh(BIN, "-S", "zoulou2", "-m", "-c", "sleep 300")
+    d = Drive(["-S", "zoulou2", "-r"], rows=24, cols=100)
+    joined = d.expect("zoulou2", 5)
+    os.close(d.fd)                      # plus de maitre : EOF sur stdin
+    t0 = time.time()
+    st = None
+    while time.time() - t0 < 2.0:
+        p, w = os.waitpid(d.pid, os.WNOHANG)
+        if p:
+            st = w
+            break
+        time.sleep(0.01)
+    check("EOF sur stdin : le client rend la main (pas de boucle a 100 % CPU)",
+          joined and st == 0)
+    sh(BIN, "-S", "zoulou2", "-x")
 
     fails = [n for n, ok in __import__("drive").RESULTS if not ok]
     print("\n----------------------------------------")
