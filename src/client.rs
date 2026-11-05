@@ -187,7 +187,15 @@ const CHORD_MS: u64 = 300;
 
 impl Client {
     fn new(cfg: Config) -> Result<Client> {
-        let (rows, cols) = term::term_size(0)?;
+        // un terminal sans taille connue (0x0, ce que rendent certains émulateurs
+        // de pipe) ne doit pas faire échouer la connexion : on retombe sur la
+        // taille déclarée par la session, sinon sur 24x80
+        let (rows, cols) = match term::term_size(0) {
+            Ok(v) => v,
+            Err(_) => SessionMeta::load(&cfg.session)
+                .map(|m| (m.rows.max(4), m.cols.max(12)))
+                .unwrap_or((24, 80)),
+        };
         let session = cfg.session.clone();
         let meta = SessionMeta {
             name: session.clone(),
@@ -472,6 +480,10 @@ impl Client {
                             self.tick();
                             self.draw();
                             self.flush_out();
+                            // EOF sur stdin : poll reviendra immédiatement
+                            // (POLLHUP), donc sans `dead` la boucle `loop`
+                            // tournerait à 100 % de CPU.
+                            self.dead = true;
                             break;
                         }
                         self.keybuf.extend_from_slice(&tmp[..n as usize]);
@@ -548,6 +560,10 @@ impl Client {
                     if !self.overlay_open() {
                         self.out.extend_from_slice(&b);
                     }
+                    // une trame Data peut porter un `[2J` (redraw total) qui
+                    // efface aussi la ligne de statut : on invalide le cache
+                    // pour que `draw_status` la repeigne.
+                    self.status_cache.clear();
                 }
                 SMsg::Meta(s) => {
                     if let Some(mt) = SessionMeta::decode(&s) {

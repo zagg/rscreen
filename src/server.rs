@@ -501,6 +501,11 @@ impl Server {
 
     /// lit la sortie d'une fenêtre et met à jour son émulation
     fn pump_window(&mut self, wi: usize) {
+        // la liste du `poll` a pu être bâtie avant qu'une fenêtre soit fermée
+        // dans la même passe : `kill_window` décale les indices
+        if wi >= self.wins.len() {
+            return;
+        }
         let mut buf = [0u8; 64 * 1024];
         let fd = self.wins[wi].master.as_raw_fd();
         let idx = self.wins[wi].idx;
